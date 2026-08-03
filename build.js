@@ -149,7 +149,6 @@ function formatDateHeader(dateObj) {
 
 function formatIsoDate(dateObj) {
   if (isNaN(dateObj.getTime())) return '';
-  // YYYY-MM-DD for date filtering comparisons
   const year = dateObj.getFullYear();
   const month = String(dateObj.getMonth() + 1).padStart(2, '0');
   const day = String(dateObj.getDate()).padStart(2, '0');
@@ -177,25 +176,23 @@ function formatRunTypeHtml(runTypeStr) {
   const clean = (runTypeStr || 'Scheduled Run').trim();
   const lower = clean.toLowerCase();
 
-  if (lower.includes('internal')) {
-    return `<em class="run-type-internal">${clean}</em>`;
+  if (lower.includes('internal') || lower.includes('return')) {
+    return `<em class="run-type-italic">${clean}</em>`;
   } else if (lower.includes('scheduled')) {
-    return `<strong class="run-type-scheduled">${clean}</strong>`;
+    return `<span class="run-type-scheduled-text">${clean}</span>`;
   } else if (lower.includes('extra')) {
-    return `<span class="run-type-extra">${clean}</span>`;
+    return `<span class="run-type-extra-badge">${clean}</span>`;
   } else {
     return `<span>${clean}</span>`;
   }
 }
 
 function generateGroupedHtmlTable(clientName, trips) {
-  // Collect unique vessels and run types for dropdown options
+  // Unique vessels and run types for filter dropdowns
   const uniqueVessels = Array.from(new Set(trips.map(t => (t['Resource'] || t['Vessel'] || 'Unassigned').trim()))).sort();
   const uniqueRunTypes = Array.from(new Set(trips.map(t => (t['Trip Type Name'] || 'Scheduled Run').trim()))).sort();
 
-  // Vessel Options
   const vesselOptionsHtml = uniqueVessels.map(v => `<option value="${v}">${v}</option>`).join('');
-  // Run Type Options
   const runTypeOptionsHtml = uniqueRunTypes.map(rt => `<option value="${rt}">${rt}</option>`).join('');
 
   let contentHtml = '';
@@ -203,8 +200,8 @@ function generateGroupedHtmlTable(clientName, trips) {
   if (trips.length === 0) {
     contentHtml = `<div style="text-align:center; padding: 40px; color: #666;">No upcoming confirmed trips scheduled.</div>`;
   } else {
-    // Structure: Group by Vessel -> Group by Date
-    const vesselGroups = {};
+    // Structure: Group by Day -> Group by Vessel
+    const dayGroups = {};
 
     trips.forEach(t => {
       const vessel = (t['Resource'] || t['Vessel'] || 'Unassigned').trim();
@@ -213,79 +210,85 @@ function generateGroupedHtmlTable(clientName, trips) {
       const dateLabel = formatDateHeader(dStart);
       const isoDate = formatIsoDate(dStart);
 
-      if (!vesselGroups[vessel]) {
-        vesselGroups[vessel] = {};
+      if (!dayGroups[dateLabel]) {
+        dayGroups[dateLabel] = { isoDate, vessels: {} };
       }
-      if (!vesselGroups[vessel][dateLabel]) {
-        vesselGroups[vessel][dateLabel] = [];
+      if (!dayGroups[dateLabel].vessels[vessel]) {
+        dayGroups[dateLabel].vessels[vessel] = [];
       }
 
-      vesselGroups[vessel][dateLabel].push({ row: t, dStart, dEnd, isoDate });
+      dayGroups[dateLabel].vessels[vessel].push({ row: t, dStart, dEnd, isoDate });
     });
 
-    for (const [vesselName, datesDict] of Object.entries(vesselGroups)) {
+    for (const [dateLabel, dayData] of Object.entries(dayGroups)) {
       contentHtml += `
-        <div class="vessel-block" data-vessel-name="${vesselName.toLowerCase()}">
-          <div class="vessel-header-banner">
-            <span>🚢 Vessel: <strong>${vesselName}</strong></span>
+        <div class="day-block" data-date="${dayData.isoDate}">
+          <div class="day-header-banner">
+            📅 ${dateLabel}
           </div>
-          <table class="schedule-table">
-            <thead>
-              <tr>
-                <th>Run Type</th>
-                <th>Departure Loc</th>
-                <th>Dep Time</th>
-                <th>Arrival Loc</th>
-                <th>Arr Time</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
       `;
 
-      for (const [dateLabel, dayTrips] of Object.entries(datesDict)) {
-        const dateKey = `${vesselName.toLowerCase()}-${dayTrips[0].isoDate}`;
-
+      for (const [vesselName, dayVesselTrips] of Object.entries(dayData.vessels)) {
         contentHtml += `
-          <tr class="date-header-row" data-date-group="${dateKey}">
-            <td colspan="6" class="date-header">📅 ${dateLabel}</td>
-          </tr>
+          <div class="vessel-block" data-vessel-name="${vesselName.toLowerCase()}">
+            <div class="vessel-sub-header">
+              🚢 Vessel: <strong>${vesselName}</strong>
+            </div>
+            <table class="schedule-table">
+              <thead>
+                <tr>
+                  <th style="width: 20%;">Run Type</th>
+                  <th style="width: 35%;">Route</th>
+                  <th style="width: 15%;">Dep Time</th>
+                  <th style="width: 15%;">Arr Time</th>
+                  <th style="width: 15%;">Status</th>
+                </tr>
+              </thead>
+              <tbody>
         `;
 
-        dayTrips.forEach(({ row, dStart, dEnd, isoDate }) => {
+        dayVesselTrips.forEach(({ row, dStart, dEnd, isoDate }) => {
           const runTypeRaw = row['Trip Type Name'] || 'Scheduled Run';
           const runTypeHtml = formatRunTypeHtml(runTypeRaw);
           const depLoc = row['Location From Name'] || row['Origin'] || '-';
-          const depTime = formatTimeOnly(dStart);
           const arrLoc = row['Location To Name'] || row['Destination'] || '-';
+          const depTime = formatTimeOnly(dStart);
           const arrTime = formatTimeOnly(dEnd);
           const status = formatStatus(row['Status']);
 
+          const routeText = (depLoc && arrLoc) 
+            ? `${depLoc} &rarr; ${arrLoc}` 
+            : (depLoc || arrLoc || 'Local Waters');
+
+          const isScheduled = runTypeRaw.toLowerCase().includes('scheduled');
           const isExtra = runTypeRaw.toLowerCase().includes('extra');
-          const rowClass = isExtra ? 'data-row extra-run-row' : 'data-row';
+
+          let rowClass = 'data-row';
+          if (isScheduled) rowClass += ' scheduled-run-row';
+          if (isExtra) rowClass += ' extra-run-row';
 
           contentHtml += `
             <tr class="${rowClass}" 
                 data-vessel="${vesselName.toLowerCase()}" 
                 data-runtype="${runTypeRaw.toLowerCase()}" 
-                data-date="${isoDate}"
-                data-date-group="${dateKey}">
+                data-date="${isoDate}">
               <td>${runTypeHtml}</td>
-              <td><strong>${depLoc}</strong></td>
+              <td class="route-cell">${routeText}</td>
               <td>${depTime}</td>
-              <td><strong>${arrLoc}</strong></td>
               <td>${arrTime}</td>
               <td><span class="badge">${status}</span></td>
             </tr>
           `;
         });
+
+        contentHtml += `
+              </tbody>
+            </table>
+          </div>
+        `;
       }
 
-      contentHtml += `
-            </tbody>
-          </table>
-        </div>
-      `;
+      contentHtml += `</div>`; // End day-block
     }
   }
 
@@ -311,23 +314,32 @@ function generateGroupedHtmlTable(clientName, trips) {
         .btn-reset { padding: 8px 16px; background: #00529b; color: #fff; border: none; border-radius: 4px; font-weight: bold; font-size: 13px; cursor: pointer; transition: background 0.2s; }
         .btn-reset:hover { background: #003a6e; }
 
-        /* Vessel Group Styling */
-        .vessel-block { margin-bottom: 28px; border: 1px solid #d0dbe5; border-radius: 6px; overflow: hidden; background: #fff; }
-        .vessel-header-banner { background: #00529b; color: #fff; padding: 12px 16px; font-size: 16px; font-weight: bold; }
+        /* Day Block Styling */
+        .day-block { margin-bottom: 32px; border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; background: #fff; }
+        .day-header-banner { background: #00529b; color: #fff; padding: 14px 18px; font-size: 17px; font-weight: bold; letter-spacing: 0.3px; }
+
+        /* Vessel Sub-Block Styling */
+        .vessel-block { margin: 16px; border: 1px solid #d0dbe5; border-radius: 6px; overflow: hidden; background: #fff; }
+        .vessel-sub-header { background: #e8f1f8; color: #00529b; padding: 10px 14px; font-size: 14px; font-weight: bold; border-bottom: 1px solid #d0dbe5; }
 
         /* Schedule Tables */
         .schedule-table { width: 100%; border-collapse: collapse; }
-        .schedule-table th, .schedule-table td { text-align: left; padding: 12px; border-bottom: 1px solid #e1e4e8; }
+        .schedule-table th, .schedule-table td { text-align: left; padding: 11px 14px; border-bottom: 1px solid #e1e4e8; }
         .schedule-table th { background-color: #f8f9fa; color: #555; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
         
-        .date-header-row { background-color: #e8f1f8; }
-        .date-header { color: #00529b; font-weight: bold; font-size: 13px; padding: 10px 12px; border-top: 1px solid #00529b; border-bottom: 1px solid #00529b; }
+        .route-cell { font-weight: normal; color: #333; }
+
+        /* Run Type Specific Styling */
+        .run-type-italic { font-style: italic; color: #555; font-weight: normal; }
+        .run-type-scheduled-text { font-weight: bold; color: #0a3663; }
         
-        /* Run Type Specific Formatting */
-        .run-type-scheduled { font-weight: bold; color: #111; }
-        .run-type-internal { font-style: italic; color: #444; }
-        .run-type-extra { background-color: #ffe8cc; color: #d97706; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; border: 1px solid #fbd38d; display: inline-block; }
+        /* SCHEDULED RUN ROW: Entire row fully bolded with pleasant blue background */
+        .scheduled-run-row { background-color: #e8f4fd; font-weight: bold; color: #0a3663; border-left: 4px solid #00529b; }
+        .scheduled-run-row td { color: #0a3663; }
+        
+        /* EXTRA RUN ROW: Light orange background & orange badge */
         .extra-run-row { background-color: #fffaf0; }
+        .run-type-extra-badge { background-color: #ffe8cc; color: #d97706; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; border: 1px solid #fbd38d; display: inline-block; }
 
         .badge { background: #e6f4ea; color: #137333; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
         .no-results { display: none; text-align: center; padding: 40px; color: #888; font-size: 15px; }
@@ -413,18 +425,16 @@ function generateGroupedHtmlTable(clientName, trips) {
             if (show) visibleCount++;
           });
 
-          // Toggle Date Header Row Visibility
-          document.querySelectorAll('.date-header-row').forEach(header => {
-            const dateGroupKey = header.getAttribute('data-date-group');
-            const matchingRows = document.querySelectorAll('.data-row[data-date-group="' + dateGroupKey + '"]');
-            const hasVisibleChild = Array.from(matchingRows).some(r => r.style.display !== 'none');
-            header.style.display = hasVisibleChild ? '' : 'none';
+          // Toggle Vessel Block Visibility inside Day Blocks
+          document.querySelectorAll('.vessel-block').forEach(vesselBlock => {
+            const visibleChildRows = vesselBlock.querySelectorAll('.data-row:not([style*="display: none"])');
+            vesselBlock.style.display = visibleChildRows.length > 0 ? '' : 'none';
           });
 
-          // Toggle Vessel Block Visibility
-          document.querySelectorAll('.vessel-block').forEach(block => {
-            const visibleChildRows = block.querySelectorAll('.data-row:not([style*="display: none"])');
-            block.style.display = visibleChildRows.length > 0 ? '' : 'none';
+          // Toggle Day Block Visibility
+          document.querySelectorAll('.day-block').forEach(dayBlock => {
+            const visibleVesselBlocks = dayBlock.querySelectorAll('.vessel-block:not([style*="display: none"])');
+            dayBlock.style.display = visibleVesselBlocks.length > 0 ? '' : 'none';
           });
 
           // Toggle No Results Banner
