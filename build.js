@@ -18,9 +18,9 @@ if (!CSV_URL) {
 // 2. CLIENT CONFIGURATION
 // ---------------------------------------------------------------------------
 const CLIENT_CONFIG = [
-  { name: 'Client A', slug: 'client-a-trips-x9k2' },
-  { name: 'Client B', slug: 'client-b-trips-m4p1' },
-  { name: 'Client C', slug: 'client-c-trips-z8w7' }
+  { name: 'Australian Pacific LNG', slug: 'client-a-trips-x9k2' },
+  { name: 'Queensland Gas Company', slug: 'client-b-trips-m4p1' },
+  { name: 'Gladstone LNG', slug: 'client-c-trips-z8w7' }
 ];
 
 async function generateSites() {
