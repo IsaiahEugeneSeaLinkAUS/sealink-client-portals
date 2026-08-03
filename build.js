@@ -23,6 +23,40 @@ const CLIENT_CONFIG = [
   { name: 'Queensland Gas Company', slug: 'qgc-schedules-z8w7' }
 ];
 
+// Helper to parse Helm CSV date strings as explicit Brisbane time (UTC+10)
+function parseHelmDate(dateStr) {
+  if (!dateStr) {
+    return { isoDate: '', dateLabel: 'TBD', timeStr: 'TBD', timestamp: 0 };
+  }
+
+  const clean = String(dateStr).trim().replace('T', ' ');
+  const parts = clean.split(' ');
+  const isoDate = parts[0]; // YYYY-MM-DD
+  const rawTime = parts[1] ? parts[1].substring(0, 5) : '00:00'; // HH:MM
+
+  // Explicitly append +10:00 offset so JS interprets as Australia/Brisbane local time
+  const isoWithOffset = `${isoDate}T${rawTime}:00+10:00`;
+  const dateObj = new Date(isoWithOffset);
+
+  let dateLabel = 'TBD';
+  if (!isNaN(dateObj.getTime())) {
+    dateLabel = dateObj.toLocaleDateString('en-AU', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'Australia/Brisbane'
+    });
+  }
+
+  return {
+    isoDate,
+    dateLabel,
+    timeStr: rawTime,
+    timestamp: isNaN(dateObj.getTime()) ? 0 : dateObj.getTime()
+  };
+}
+
 async function generateSites() {
   console.log('Fetching latest Helm Connect CSV...');
 
@@ -89,11 +123,11 @@ async function generateSites() {
     }
   }
 
-  // Sort chronologically ascending (earliest upcoming trip first)
+  // Sort chronologically ascending
   validTrips.sort((a, b) => {
-    const dateA = new Date(a['Start'] || a['Requested Date']);
-    const dateB = new Date(b['Start'] || b['Requested Date']);
-    return dateA - dateB;
+    const startA = parseHelmDate(a['Start'] || a['Requested Date']).timestamp;
+    const startB = parseHelmDate(b['Start'] || b['Requested Date']).timestamp;
+    return startA - startB;
   });
 
   console.log(`Deduplicated and sorted down to ${validTrips.length} upcoming confirmed trips.`);
@@ -135,37 +169,6 @@ async function generateSites() {
   });
 }
 
-function formatDateHeader(dateObj) {
-  if (isNaN(dateObj.getTime())) return 'Upcoming Trips';
-  
-  return dateObj.toLocaleDateString('en-AU', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    timeZone: 'Australia/Brisbane'
-  });
-}
-
-function formatIsoDate(dateObj) {
-  if (isNaN(dateObj.getTime())) return '';
-  const year = dateObj.getFullYear();
-  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const day = String(dateObj.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function formatTimeOnly(dateObj) {
-  if (isNaN(dateObj.getTime())) return 'TBD';
-
-  return dateObj.toLocaleTimeString('en-AU', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-    timeZone: 'Australia/Brisbane'
-  });
-}
-
 function formatStatus(statusStr) {
   if (!statusStr) return 'Confirmed';
   const clean = statusStr.replace(/^STATUS_/i, '');
@@ -188,7 +191,6 @@ function formatRunTypeHtml(runTypeStr) {
 }
 
 function generateGroupedHtmlTable(clientName, trips) {
-  // Unique vessels and run types for filter dropdowns
   const uniqueVessels = Array.from(new Set(trips.map(t => (t['Resource'] || t['Vessel'] || 'Unassigned').trim()))).sort();
   const uniqueRunTypes = Array.from(new Set(trips.map(t => (t['Trip Type Name'] || 'Scheduled Run').trim()))).sort();
 
@@ -205,10 +207,11 @@ function generateGroupedHtmlTable(clientName, trips) {
 
     trips.forEach(t => {
       const vessel = (t['Resource'] || t['Vessel'] || 'Unassigned').trim();
-      const dStart = new Date(t['Start'] || t['Requested Date']);
-      const dEnd = new Date(t['End']);
-      const dateLabel = formatDateHeader(dStart);
-      const isoDate = formatIsoDate(dStart);
+      const parsedStart = parseHelmDate(t['Start'] || t['Requested Date']);
+      const parsedEnd = parseHelmDate(t['End']);
+
+      const dateLabel = parsedStart.dateLabel;
+      const isoDate = parsedStart.isoDate;
 
       if (!dayGroups[dateLabel]) {
         dayGroups[dateLabel] = { isoDate, vessels: {} };
@@ -217,7 +220,7 @@ function generateGroupedHtmlTable(clientName, trips) {
         dayGroups[dateLabel].vessels[vessel] = [];
       }
 
-      dayGroups[dateLabel].vessels[vessel].push({ row: t, dStart, dEnd, isoDate });
+      dayGroups[dateLabel].vessels[vessel].push({ row: t, parsedStart, parsedEnd, isoDate });
     });
 
     for (const [dateLabel, dayData] of Object.entries(dayGroups)) {
@@ -247,13 +250,13 @@ function generateGroupedHtmlTable(clientName, trips) {
               <tbody>
         `;
 
-        dayVesselTrips.forEach(({ row, dStart, dEnd, isoDate }) => {
+        dayVesselTrips.forEach(({ row, parsedStart, parsedEnd, isoDate }) => {
           const runTypeRaw = row['Trip Type Name'] || 'Scheduled Run';
           const runTypeHtml = formatRunTypeHtml(runTypeRaw);
           const depLoc = row['Location From Name'] || row['Origin'] || '-';
           const arrLoc = row['Location To Name'] || row['Destination'] || '-';
-          const depTime = formatTimeOnly(dStart);
-          const arrTime = formatTimeOnly(dEnd);
+          const depTime = parsedStart.timeStr;
+          const arrTime = parsedEnd.timeStr;
           const status = formatStatus(row['Status']);
 
           const routeText = (depLoc && arrLoc) 
@@ -335,7 +338,7 @@ function generateGroupedHtmlTable(clientName, trips) {
         
         /* SCHEDULED RUN ROW: Entire row fully bolded with pleasant blue background */
         .scheduled-run-row { background-color: #e8f4fd; font-weight: bold; color: #0a3663; border-left: 4px solid #00529b; }
-        .scheduled-run-row td { color: #0a3663; }
+        .scheduled-run-row td { color: #0a3663; font-weight: bold; }
         
         /* EXTRA RUN ROW: Light orange background & orange badge */
         .extra-run-row { background-color: #fffaf0; }
