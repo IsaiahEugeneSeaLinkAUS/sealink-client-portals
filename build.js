@@ -3,27 +3,19 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 
 // ---------------------------------------------------------------------------
-// 1. ENVIRONMENT & URL SANITIZATION
+// 1. ENVIRONMENT VARIABLES & SANITIZATION
 // ---------------------------------------------------------------------------
 const rawUrl = process.env.HELM_CSV_URL || '';
 const CSV_URL = rawUrl.trim().replace(/^["']|["']$/g, '');
+const API_KEY = (process.env.HELM_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 
 if (!CSV_URL) {
   console.error('CRITICAL ERROR: HELM_CSV_URL environment variable is missing or empty in Netlify settings.');
   process.exit(1);
 }
 
-try {
-  new URL(CSV_URL);
-} catch (e) {
-  console.error(`CRITICAL ERROR: HELM_CSV_URL is not a valid URL string. Received length: ${CSV_URL.length}`);
-  process.exit(1);
-}
-
 // ---------------------------------------------------------------------------
 // 2. CLIENT CONFIGURATION
-// Replace 'Client A', 'Client B', 'Client C' with your exact Helm Connect customer names
-// once you see them in the Netlify build log.
 // ---------------------------------------------------------------------------
 const CLIENT_CONFIG = [
   { name: 'Client A', slug: 'client-a-trips-x9k2' },
@@ -32,18 +24,26 @@ const CLIENT_CONFIG = [
 ];
 
 async function generateSites() {
-  console.log('Fetching latest Helm Connect CSV...');
-  const response = await fetch(CSV_URL);
+  console.log('Fetching latest Helm Connect CSV with Api-Key Header...');
+
+  // Set the specific Api-Key header expected by Helm Connect
+  const headers = {};
+  if (API_KEY) {
+    headers['Api-Key'] = API_KEY;
+  } else {
+    console.warn('WARNING: HELM_API_KEY environment variable is missing in Netlify settings.');
+  }
+
+  const response = await fetch(CSV_URL, { headers });
 
   console.log(`HTTP Fetch Status: ${response.status} ${response.statusText}`);
 
   if (!response.ok) {
-    throw new Error(`Failed to download CSV from Helm Connect. HTTP Status: ${response.status}`);
+    throw new Error(`Failed to download CSV from Helm Connect. HTTP Status: ${response.status} ${response.statusText}`);
   }
 
   const csvText = await response.text();
 
-  // DIAGNOSTIC LOGS: Inspect raw download snippet
   console.log('--- RAW CSV SNIPPET (First 250 Characters) ---');
   console.log(csvText.substring(0, 250));
   console.log('----------------------------------------------');
@@ -62,15 +62,12 @@ async function generateSites() {
     console.log('--- SAMPLE ROW DATA ---');
     console.log(records[0]);
     console.log('----------------------------------');
-  } else {
-    console.warn('WARNING: The CSV file was downloaded but contains 0 data rows.');
   }
 
   // ---------------------------------------------------------------------------
   // 3. FILTER OUT CANCELLED / UNCONFIRMED TRIPS
   // ---------------------------------------------------------------------------
   const validTrips = records.filter(row => {
-    // Check multiple potential status column names
     const status = (
       row['Status'] || 
       row['Job Status'] || 
@@ -87,11 +84,9 @@ async function generateSites() {
 
   console.log(`Filtered dataset down to ${validTrips.length} active/confirmed trips.`);
 
-  // Prepare Output Directory
   const publicDir = path.join(__dirname, 'public');
   if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
 
-  // Generate Root Landing Page
   fs.writeFileSync(path.join(publicDir, 'index.html'), `
     <!DOCTYPE html>
     <html><head><title>SeaLink Gladstone Portal</title></head>
@@ -106,7 +101,6 @@ async function generateSites() {
   // ---------------------------------------------------------------------------
   CLIENT_CONFIG.forEach(client => {
     const clientTrips = validTrips.filter(row => {
-      // Check multiple potential customer/account column names
       const customer = (
         row['Customer'] || 
         row['Account'] || 
@@ -131,7 +125,6 @@ async function generateSites() {
 function generateHtmlTable(clientName, trips) {
   const rowsHtml = trips.length > 0
     ? trips.map(t => {
-        // Robust field extraction with header fallbacks
         const jobRef = t['Job #'] || t['Job Number'] || t['Reference'] || t['Job ID'] || 'N/A';
         const vessel = t['Vessel'] || t['Asset'] || t['Vessel Name'] || 'TBD';
         const departure = t['Start Time'] || t['Departure'] || t['ETA'] || t['Date'] || 'TBD';
