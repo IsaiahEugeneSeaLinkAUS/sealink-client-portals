@@ -35,7 +35,7 @@ async function generateSites() {
   console.log(`HTTP Fetch Status: ${response.status} ${response.statusText}`);
 
   if (!response.ok) {
-    throw new Error(`Failed to download CSV from Helm Connect. HTTP Status: ${response.status} ${response.statusText}`);
+    throw new Error(`Failed to download CSV from Helm Connect. HTTP Status: ${response.status}`);
   }
 
   const csvText = await response.text();
@@ -51,7 +51,7 @@ async function generateSites() {
   // ---------------------------------------------------------------------------
   // 3. FILTER OUT CANCELLED, COMPLETED, DRAFT & PENDING TRIPS
   // ---------------------------------------------------------------------------
-  const validTrips = records.filter(row => {
+  const filteredTrips = records.filter(row => {
     const status = String(
       row['Status'] || 
       row['Job Status'] || 
@@ -63,11 +63,39 @@ async function generateSites() {
     const isComplete = status.includes('COMPLETE');
     const isDraft = status.includes('DRAFT') || status.includes('PENDING') || status.includes('UNCONFIRM');
 
-    // Keep strictly active, confirmed upcoming runs
     return !isCancelled && !isComplete && !isDraft;
   });
 
-  console.log(`Filtered down to ${validTrips.length} upcoming confirmed trips.`);
+  // ---------------------------------------------------------------------------
+  // 4. DEDUPLICATE & SORT CHRONOLOGICALLY ASCENDING
+  // ---------------------------------------------------------------------------
+  const seenKeys = new Set();
+  const validTrips = [];
+
+  for (const row of filteredTrips) {
+    const cust = (row['Customer Account Name'] || row['Customer'] || row['Account'] || '').trim();
+    const type = (row['Trip Type Name'] || row['Trip Type'] || '').trim();
+    const start = (row['Start'] || row['Requested Date'] || '').trim();
+    const end = (row['End'] || '').trim();
+    const from = (row['Location From Name'] || row['Origin'] || '').trim();
+    const to = (row['Location To Name'] || row['Destination'] || '').trim();
+
+    const dedupKey = `${cust}|${type}|${start}|${end}|${from}|${to}`;
+
+    if (!seenKeys.has(dedupKey)) {
+      seenKeys.add(dedupKey);
+      validTrips.push(row);
+    }
+  }
+
+  // Sort chronologically ascending (earliest upcoming trip first)
+  validTrips.sort((a, b) => {
+    const dateA = new Date(a['Start'] || a['Requested Date']);
+    const dateB = new Date(b['Start'] || b['Requested Date']);
+    return dateA - dateB;
+  });
+
+  console.log(`Deduplicated and sorted down to ${validTrips.length} upcoming confirmed trips.`);
 
   const publicDir = path.join(__dirname, 'public');
   if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
@@ -83,7 +111,7 @@ async function generateSites() {
   `);
 
   // ---------------------------------------------------------------------------
-  // 4. GENERATE INDIVIDUAL CLIENT PORTALS
+  // 5. GENERATE GROUPED CLIENT PORTALS
   // ---------------------------------------------------------------------------
   CLIENT_CONFIG.forEach(client => {
     const clientTrips = validTrips.filter(row => {
@@ -100,21 +128,28 @@ async function generateSites() {
     const clientDir = path.join(publicDir, client.slug);
     if (!fs.existsSync(clientDir)) fs.mkdirSync(clientDir);
 
-    const htmlContent = generateHtmlTable(client.name, clientTrips);
+    const htmlContent = generateGroupedHtmlTable(client.name, clientTrips);
     fs.writeFileSync(path.join(clientDir, 'index.html'), htmlContent);
     console.log(`Generated schedule for ${client.name} (${clientTrips.length} upcoming trips) at /${client.slug}/`);
   });
 }
 
-function formatDate(dateStr) {
-  if (!dateStr) return 'TBD';
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return dateStr;
+function formatDateHeader(dateObj) {
+  if (isNaN(dateObj.getTime())) return 'Upcoming Trips';
   
-  return d.toLocaleString('en-AU', {
-    day: '2-digit',
-    month: '2-digit',
+  return dateObj.toLocaleDateString('en-AU', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
     year: 'numeric',
+    timeZone: 'Australia/Brisbane'
+  });
+}
+
+function formatTimeOnly(dateObj) {
+  if (isNaN(dateObj.getTime())) return 'TBD';
+
+  return dateObj.toLocaleTimeString('en-AU', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
@@ -128,29 +163,55 @@ function formatStatus(statusStr) {
   return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
 }
 
-function generateHtmlTable(clientName, trips) {
-  const rowsHtml = trips.length > 0
-    ? trips.map(t => {
-        const runType = t['Trip Type Name'] || 'Scheduled Run';
-        const departure = formatDate(t['Start'] || t['Requested Date']);
-        const origin = t['Location From Name'] || '';
-        const destination = t['Location To Name'] || '';
-        const status = formatStatus(t['Status']);
+function generateGroupedHtmlTable(clientName, trips) {
+  let tableRowsHtml = '';
 
-        const routeText = (origin && destination) 
-          ? `${origin} &rarr; ${destination}` 
-          : (origin || destination || 'Local Waters');
+  if (trips.length === 0) {
+    tableRowsHtml = `<tr><td colspan="6" style="text-align:center; padding: 25px; color: #666;">No upcoming confirmed trips scheduled.</td></tr>`;
+  } else {
+    // Group trips by date string (e.g. "Monday, 3 August 2026")
+    const groupedByDate = {};
 
-        return `
+    trips.forEach(t => {
+      const dStart = new Date(t['Start'] || t['Requested Date']);
+      const dEnd = new Date(t['End']);
+      const dateKey = formatDateHeader(dStart);
+
+      if (!groupedByDate[dateKey]) {
+        groupedByDate[dateKey] = [];
+      }
+      groupedByDate[dateKey].push({ row: t, dStart, dEnd });
+    });
+
+    // Build HTML rows with date subheaders spanning 6 columns
+    for (const [dateLabel, dayTrips] of Object.entries(groupedByDate)) {
+      tableRowsHtml += `
+        <tr class="date-header-row">
+          <td colspan="6" class="date-header">${dateLabel}</td>
+        </tr>
+      `;
+
+      dayTrips.forEach(({ row, dStart, dEnd }) => {
+        const runType = row['Trip Type Name'] || 'Scheduled Run';
+        const depLoc = row['Location From Name'] || row['Origin'] || '-';
+        const depTime = formatTimeOnly(dStart);
+        const arrLoc = row['Location To Name'] || row['Destination'] || '-';
+        const arrTime = formatTimeOnly(dEnd);
+        const status = formatStatus(row['Status']);
+
+        tableRowsHtml += `
           <tr>
-            <td><strong>${runType}</strong></td>
-            <td>${departure}</td>
-            <td>${routeText}</td>
+            <td>${runType}</td>
+            <td><strong>${depLoc}</strong></td>
+            <td>${depTime}</td>
+            <td><strong>${arrLoc}</strong></td>
+            <td>${arrTime}</td>
             <td><span class="badge">${status}</span></td>
           </tr>
         `;
-      }).join('')
-    : `<tr><td colspan="4" style="text-align:center; padding: 25px; color: #666;">No upcoming confirmed trips scheduled.</td></tr>`;
+      });
+    }
+  }
 
   return `
     <!DOCTYPE html>
@@ -161,13 +222,15 @@ function generateHtmlTable(clientName, trips) {
       <title>${clientName} - Upcoming Vessel Trips | SeaLink Gladstone</title>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
-        .container { max-width: 1000px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .container { max-width: 1100px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
         .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #00529b; padding-bottom: 12px; margin-bottom: 20px; }
         h1 { color: #00529b; margin: 0; font-size: 24px; }
         .timestamp { font-size: 12px; color: #666; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e1e4e8; }
-        th { background-color: #f8f9fa; color: #555; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
+        th { background-color: #f8f9fa; color: #555; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .date-header-row { background-color: #e8f1f8; }
+        .date-header { color: #00529b; font-weight: bold; font-size: 14px; padding: 12px; border-top: 2px solid #00529b; border-bottom: 1px solid #00529b; }
         .badge { background: #e6f4ea; color: #137333; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
       </style>
     </head>
@@ -184,13 +247,15 @@ function generateHtmlTable(clientName, trips) {
           <thead>
             <tr>
               <th>Run Type</th>
-              <th>Departure / Time</th>
-              <th>Route</th>
+              <th>Departure Loc</th>
+              <th>Dep Time</th>
+              <th>Arrival Loc</th>
+              <th>Arr Time</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody>
-            ${rowsHtml}
+            ${tableRowsHtml}
           </tbody>
         </table>
       </div>
