@@ -10,32 +10,28 @@ const CSV_URL = rawUrl.trim().replace(/^["']|["']$/g, '');
 const API_KEY = (process.env.HELM_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 
 if (!CSV_URL) {
-  console.error('CRITICAL ERROR: HELM_CSV_URL environment variable is missing or empty in Netlify settings.');
+  console.error('CRITICAL ERROR: HELM_CSV_URL environment variable is missing in Netlify settings.');
   process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
-// 2. CLIENT CONFIGURATION
+// 2. CLIENT CONFIGURATION (Helm Customer Account Names & URL Slugs)
 // ---------------------------------------------------------------------------
 const CLIENT_CONFIG = [
-  { name: 'Australian Pacific LNG', slug: 'client-a-trips-x9k2' },
-  { name: 'Queensland Gas Company', slug: 'client-b-trips-m4p1' },
-  { name: 'Gladstone LNG', slug: 'client-c-trips-z8w7' }
+  { name: 'Australian Pacific LNG', slug: 'aplng-schedules-x9k2' },
+  { name: 'Gladstone LNG', slug: 'glng-schedules-m4p1' },
+  { name: 'Queensland Gas Company', slug: 'qgc-schedules-z8w7' }
 ];
 
 async function generateSites() {
-  console.log('Fetching latest Helm Connect CSV with Api-Key Header...');
+  console.log('Fetching latest Helm Connect CSV...');
 
-  // Set the specific Api-Key header expected by Helm Connect
   const headers = {};
   if (API_KEY) {
     headers['Api-Key'] = API_KEY;
-  } else {
-    console.warn('WARNING: HELM_API_KEY environment variable is missing in Netlify settings.');
   }
 
   const response = await fetch(CSV_URL, { headers });
-
   console.log(`HTTP Fetch Status: ${response.status} ${response.statusText}`);
 
   if (!response.ok) {
@@ -44,49 +40,39 @@ async function generateSites() {
 
   const csvText = await response.text();
 
-  console.log('--- RAW CSV SNIPPET (First 250 Characters) ---');
-  console.log(csvText.substring(0, 250));
-  console.log('----------------------------------------------');
-
   const records = parse(csvText, {
     columns: true,
     skip_empty_lines: true,
     trim: true
   });
 
-  console.log(`Successfully parsed ${records.length} total rows from CSV.`);
-
-  if (records.length > 0) {
-    console.log('--- DETECTED CSV COLUMN HEADERS ---');
-    console.log(Object.keys(records[0]));
-    console.log('--- SAMPLE ROW DATA ---');
-    console.log(records[0]);
-    console.log('----------------------------------');
-  }
+  console.log(`Parsed ${records.length} total rows from Helm.`);
 
   // ---------------------------------------------------------------------------
-  // 3. FILTER OUT CANCELLED / UNCONFIRMED TRIPS
+  // 3. FILTER OUT CANCELLED, COMPLETED, DRAFT & PENDING TRIPS
   // ---------------------------------------------------------------------------
   const validTrips = records.filter(row => {
-    const status = (
+    const status = String(
       row['Status'] || 
       row['Job Status'] || 
-      row['State'] || 
       row['Trip Status'] || 
       ''
-    ).toLowerCase();
+    ).toUpperCase().trim();
 
-    const isCancelled = status.includes('cancel');
-    const isUnconfirmed = status.includes('unconfirm') || status.includes('draft') || status.includes('pending');
+    const isCancelled = status.includes('CANCEL');
+    const isComplete = status.includes('COMPLETE');
+    const isDraft = status.includes('DRAFT') || status.includes('PENDING') || status.includes('UNCONFIRM');
 
-    return !isCancelled && !isUnconfirmed;
+    // Keep strictly active, confirmed upcoming runs
+    return !isCancelled && !isComplete && !isDraft;
   });
 
-  console.log(`Filtered dataset down to ${validTrips.length} active/confirmed trips.`);
+  console.log(`Filtered down to ${validTrips.length} upcoming confirmed trips.`);
 
   const publicDir = path.join(__dirname, 'public');
   if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
 
+  // Root Landing Page
   fs.writeFileSync(path.join(publicDir, 'index.html'), `
     <!DOCTYPE html>
     <html><head><title>SeaLink Gladstone Portal</title></head>
@@ -97,16 +83,14 @@ async function generateSites() {
   `);
 
   // ---------------------------------------------------------------------------
-  // 4. FILTER & GENERATE PAGES PER CLIENT
+  // 4. GENERATE INDIVIDUAL CLIENT PORTALS
   // ---------------------------------------------------------------------------
   CLIENT_CONFIG.forEach(client => {
     const clientTrips = validTrips.filter(row => {
-      const customer = (
+      const customer = String(
+        row['Customer Account Name'] || 
         row['Customer'] || 
         row['Account'] || 
-        row['Customer Account Name'] || 
-        row['Customer Name'] || 
-        row['Client'] || 
         ''
       ).toLowerCase();
 
@@ -118,19 +102,40 @@ async function generateSites() {
 
     const htmlContent = generateHtmlTable(client.name, clientTrips);
     fs.writeFileSync(path.join(clientDir, 'index.html'), htmlContent);
-    console.log(`Generated page for ${client.name} (${clientTrips.length} trips matched) at /${client.slug}/`);
+    console.log(`Generated schedule for ${client.name} (${clientTrips.length} upcoming trips) at /${client.slug}/`);
   });
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return 'TBD';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  
+  return d.toLocaleString('en-AU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Australia/Brisbane'
+  });
+}
+
+function formatStatus(statusStr) {
+  if (!statusStr) return 'Confirmed';
+  const clean = statusStr.replace(/^STATUS_/i, '');
+  return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
 }
 
 function generateHtmlTable(clientName, trips) {
   const rowsHtml = trips.length > 0
     ? trips.map(t => {
-        const jobRef = t['Job #'] || t['Job Number'] || t['Reference'] || t['Job ID'] || 'N/A';
-        const vessel = t['Vessel'] || t['Asset'] || t['Vessel Name'] || 'TBD';
-        const departure = t['Start Time'] || t['Departure'] || t['ETA'] || t['Date'] || 'TBD';
-        const origin = t['Origin'] || t['From'] || t['Departure Location'] || '';
-        const destination = t['Destination'] || t['To'] || t['Arrival Location'] || '';
-        const status = t['Status'] || t['Job Status'] || 'Confirmed';
+        const runType = t['Trip Type Name'] || 'Scheduled Run';
+        const departure = formatDate(t['Start'] || t['Requested Date']);
+        const origin = t['Location From Name'] || '';
+        const destination = t['Location To Name'] || '';
+        const status = formatStatus(t['Status']);
 
         const routeText = (origin && destination) 
           ? `${origin} &rarr; ${destination}` 
@@ -138,15 +143,14 @@ function generateHtmlTable(clientName, trips) {
 
         return `
           <tr>
-            <td><strong>${jobRef}</strong></td>
-            <td>${vessel}</td>
+            <td><strong>${runType}</strong></td>
             <td>${departure}</td>
             <td>${routeText}</td>
             <td><span class="badge">${status}</span></td>
           </tr>
         `;
       }).join('')
-    : `<tr><td colspan="5" style="text-align:center; padding: 25px; color: #666;">No upcoming confirmed trips found.</td></tr>`;
+    : `<tr><td colspan="4" style="text-align:center; padding: 25px; color: #666;">No upcoming confirmed trips scheduled.</td></tr>`;
 
   return `
     <!DOCTYPE html>
@@ -179,8 +183,7 @@ function generateHtmlTable(clientName, trips) {
         <table>
           <thead>
             <tr>
-              <th>Job Ref</th>
-              <th>Vessel</th>
+              <th>Run Type</th>
               <th>Departure / Time</th>
               <th>Route</th>
               <th>Status</th>
