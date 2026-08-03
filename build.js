@@ -18,9 +18,9 @@ if (!CSV_URL) {
 // 2. CLIENT CONFIGURATION (Helm Customer Account Names & URL Slugs)
 // ---------------------------------------------------------------------------
 const CLIENT_CONFIG = [
-  { name: 'Australian Pacific LNG', slug: 'aplng-schedules-x9k2' },
-  { name: 'Gladstone LNG', slug: 'glng-schedules-m4p1' },
-  { name: 'Queensland Gas Company', slug: 'qgc-schedules-z8w7' }
+  { name: 'Australian Pacific LNG', slug: 'aplng-x9k2' },
+  { name: 'Gladstone LNG', slug: 'glng-m4p1' },
+  { name: 'Queensland Gas Company', slug: 'qgc-z8w7' }
 ];
 
 // Helper to parse Helm CSV date strings as explicit Brisbane time (UTC+10)
