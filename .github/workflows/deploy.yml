@@ -1,11 +1,13 @@
-name: Build and Deploy Client Portals
+name: Build and deploy client schedule sites
 
 on:
-  # Runs automatically every hour at 10 minutes past the hour
   schedule:
-    - cron: '10 * * * *'
-  # Allows manual triggering from the Actions tab in GitHub
-  workflow_dispatch:
+    # Every 10 minutes. See the note in chat about GitHub's actual cron
+    # reliability and Actions-minutes cost before tightening this further.
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {} # lets you trigger a rebuild manually from the Actions tab
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -13,42 +15,44 @@ permissions:
   id-token: write
 
 concurrency:
-  group: 'pages'
+  group: pages
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 20
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: Run Build Script
+      - name: Build client sites
         env:
           HELM_CSV_URL: ${{ secrets.HELM_CSV_URL }}
           HELM_API_KEY: ${{ secrets.HELM_API_KEY }}
-        run: npm run build
+          ONWATCH_API_KEY: ${{ secrets.ONWATCH_API_KEY }}
+          ONWATCH_FLEET_ID: ${{ secrets.ONWATCH_FLEET_ID }}
+        run: node generate-client-sites.js
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './public'
+          path: public
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
