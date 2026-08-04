@@ -25,6 +25,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Debug - list repo root
+        run: ls -la
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -39,7 +42,7 @@ jobs:
           HELM_API_KEY: ${{ secrets.HELM_API_KEY }}
           ONWATCH_API_KEY: ${{ secrets.ONWATCH_API_KEY }}
           ONWATCH_FLEET_ID: ${{ secrets.ONWATCH_FLEET_ID }}
-        run: node generate-client-sites.js
+        run: node build.js
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
