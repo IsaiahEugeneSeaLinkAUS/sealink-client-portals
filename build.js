@@ -9,8 +9,12 @@ const rawUrl = process.env.HELM_CSV_URL || '';
 const CSV_URL = rawUrl.trim().replace(/^["']|["']$/g, '');
 const API_KEY = (process.env.HELM_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 
+// OnWatch VMS - used for live vessel positions
+const ONWATCH_API_KEY = (process.env.ONWATCH_API_KEY || '').trim();
+const ONWATCH_FLEET_ID = (process.env.ONWATCH_FLEET_ID || '').trim();
+
 if (!CSV_URL) {
-  console.error('CRITICAL ERROR: HELM_CSV_URL environment variable is missing in Netlify settings.');
+  console.error('CRITICAL ERROR: HELM_CSV_URL environment variable is missing.');
   process.exit(1);
 }
 
@@ -57,6 +61,59 @@ function parseHelmDate(dateStr) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// ONWATCH VMS - VESSEL POSITIONS
+// ---------------------------------------------------------------------------
+// GET https://api.onwatchvms.com/v1/fleets/{fleet_id}/position
+// Confirmed against a real sample response:
+//   { "object": "list", "data": [
+//       { "vessel_id", "vessel_name", "latitude", "longitude",
+//         "heading": { "value", "unit" },
+//         "speed_over_ground": { "value", "unit" },
+//         "last_updated" }
+//   ] }
+// heading and speed_over_ground are nested {value, unit} objects, not bare
+// numbers - everything (including those nested values) comes back null for
+// a vessel with no GPS reading yet.
+async function fetchOnWatchPositions() {
+  if (!ONWATCH_API_KEY || !ONWATCH_FLEET_ID) {
+    console.warn('ONWATCH_API_KEY or ONWATCH_FLEET_ID not set - skipping position pull.');
+    return [];
+  }
+
+  const url = `https://api.onwatchvms.com/v1/fleets/${ONWATCH_FLEET_ID}/position?time_zone=Australia/Brisbane`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${ONWATCH_API_KEY}` }
+  });
+
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const errBody = await response.json();
+      detail = errBody?.error?.code ? ` (${errBody.error.code}: ${errBody.error.param || ''})` : '';
+    } catch (_) { /* body wasn't JSON, or was empty - ignore */ }
+    throw new Error(`OnWatch VMS returned HTTP ${response.status}${detail}`);
+  }
+
+  const body = await response.json();
+  return body.data || [];
+}
+
+function normalizeOnWatchPositions(rawVessels) {
+  return rawVessels
+    .map(v => ({
+      name: v.vessel_name || v.vessel_id || 'Unknown',
+      lat: v.latitude,
+      lon: v.longitude,
+      headingDeg: v.heading?.value,
+      speedKn: v.speed_over_ground?.value,
+      lastUpdated: v.last_updated
+    }))
+    // Vessels with no GPS reading yet report every one of these fields as
+    // null - skip them rather than plotting a marker at (null, null).
+    .filter(v => typeof v.lat === 'number' && typeof v.lon === 'number');
+}
+
 async function generateSites() {
   console.log('Fetching latest Helm Connect CSV...');
 
@@ -87,9 +144,9 @@ async function generateSites() {
   // ---------------------------------------------------------------------------
   const filteredTrips = records.filter(row => {
     const status = String(
-      row['Status'] || 
-      row['Job Status'] || 
-      row['Trip Status'] || 
+      row['Status'] ||
+      row['Job Status'] ||
+      row['Trip Status'] ||
       ''
     ).toUpperCase().trim();
 
@@ -132,8 +189,30 @@ async function generateSites() {
 
   console.log(`Deduplicated and sorted down to ${validTrips.length} upcoming confirmed trips.`);
 
+  // ---------------------------------------------------------------------------
+  // 4b. FETCH LIVE VESSEL POSITIONS (OnWatch VMS)
+  // ---------------------------------------------------------------------------
+  let positions = [];
+  try {
+    const rawPositions = await fetchOnWatchPositions();
+    positions = normalizeOnWatchPositions(rawPositions);
+    console.log(`Fetched ${positions.length} vessel position(s) from OnWatch.`);
+  } catch (err) {
+    // Never let a position-fetch problem break the schedule build - just
+    // ship the site without fresh positions and log it for follow-up.
+    console.error('Could not fetch OnWatch positions:', err.message);
+  }
+
   const publicDir = path.join(__dirname, 'public');
   if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
+
+  // Static positions file, served alongside the client pages on GitHub
+  // Pages. No credentials in here - just the position snapshot from this
+  // build run. Client pages fetch this via a relative path.
+  fs.writeFileSync(
+    path.join(publicDir, 'positions.json'),
+    JSON.stringify({ fetchedAt: new Date().toISOString(), vessels: positions })
+  );
 
   // Root Landing Page
   fs.writeFileSync(path.join(publicDir, 'index.html'), `
@@ -151,9 +230,9 @@ async function generateSites() {
   CLIENT_CONFIG.forEach(client => {
     const clientTrips = validTrips.filter(row => {
       const customer = String(
-        row['Customer Account Name'] || 
-        row['Customer'] || 
-        row['Account'] || 
+        row['Customer Account Name'] ||
+        row['Customer'] ||
+        row['Account'] ||
         ''
       ).toLowerCase();
 
@@ -188,6 +267,86 @@ function formatRunTypeHtml(runTypeStr) {
   } else {
     return `<span>${clean}</span>`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// LIVE VESSEL POSITION MAP
+// ---------------------------------------------------------------------------
+// Renders a Leaflet map (free tiles, no API key) that reads a static
+// positions.json - generated once per build, alongside this page, by
+// fetchOnWatchPositions() above. On GitHub Pages there's no server to poll
+// live, so "live" here really means "as fresh as the last GitHub Actions
+// run" (plus a little GitHub CDN caching) - see the workflow schedule for
+// how often that is.
+function generateVesselMapHtml(relevantVesselNames) {
+  if (relevantVesselNames.length === 0) return '';
+
+  return `
+    <div class="map-panel">
+      <div class="map-panel-header">
+        🛰️ Live Vessel Position
+        <span id="map-updated" class="map-updated-label">Loading…</span>
+      </div>
+      <div id="vessel-map"></div>
+    </div>
+    <script>
+      (function () {
+        var relevantVessels = ${JSON.stringify(relevantVesselNames)}.map(function (n) { return n.trim().toLowerCase(); });
+        var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.83, 151.25], 11);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors',
+          maxZoom: 17
+        }).addTo(map);
+
+        var shipIcon = L.divIcon({
+          className: 'vessel-marker-icon',
+          html: '⛴️',
+          iconSize: [26, 26]
+        });
+
+        var markers = {};
+
+        function refreshPositions() {
+          // Relative path: works whether this site is served at a custom
+          // domain root or under a GitHub Pages project path like
+          // /repo-name/. Add a cache-busting query param since GitHub
+          // Pages' CDN will otherwise hold onto the old file for a while.
+          fetch('../positions.json?t=' + Date.now())
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+              (data.vessels || [])
+                .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
+                .forEach(function (v) {
+                  var popupHtml = '<strong>' + v.name + '</strong><br>' +
+                    (typeof v.speedKn === 'number' ? v.speedKn.toFixed(1) + ' kn' : 'Speed unavailable');
+
+                  if (markers[v.name]) {
+                    markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml);
+                  } else {
+                    markers[v.name] = L.marker([v.lat, v.lon], { icon: shipIcon })
+                      .addTo(map)
+                      .bindPopup(popupHtml);
+                  }
+                });
+
+              var updatedEl = document.getElementById('map-updated');
+              if (updatedEl) {
+                updatedEl.textContent = data.fetchedAt
+                  ? 'Updated ' + new Date(data.fetchedAt).toLocaleTimeString('en-AU', { timeZone: 'Australia/Brisbane' }) + ' AEST'
+                  : 'Position data unavailable';
+              }
+            })
+            .catch(function (err) {
+              console.error('Could not refresh vessel positions', err);
+            });
+        }
+
+        refreshPositions();
+        setInterval(refreshPositions, 60000);
+      })();
+    </script>
+  `;
 }
 
 function generateGroupedHtmlTable(clientName, trips) {
@@ -259,8 +418,8 @@ function generateGroupedHtmlTable(clientName, trips) {
           const arrTime = parsedEnd.timeStr;
           const status = formatStatus(row['Status']);
 
-          const routeText = (depLoc && arrLoc) 
-            ? `${depLoc} &rarr; ${arrLoc}` 
+          const routeText = (depLoc && arrLoc)
+            ? `${depLoc} &rarr; ${arrLoc}`
             : (depLoc || arrLoc || 'Local Waters');
 
           const isScheduled = runTypeRaw.toLowerCase().includes('scheduled');
@@ -271,9 +430,9 @@ function generateGroupedHtmlTable(clientName, trips) {
           if (isExtra) rowClass += ' extra-run-row';
 
           contentHtml += `
-            <tr class="${rowClass}" 
-                data-vessel="${vesselName.toLowerCase()}" 
-                data-runtype="${runTypeRaw.toLowerCase()}" 
+            <tr class="${rowClass}"
+                data-vessel="${vesselName.toLowerCase()}"
+                data-runtype="${runTypeRaw.toLowerCase()}"
                 data-date="${isoDate}">
               <td>${runTypeHtml}</td>
               <td class="route-cell">${routeText}</td>
@@ -295,6 +454,8 @@ function generateGroupedHtmlTable(clientName, trips) {
     }
   }
 
+  const mapHtml = generateVesselMapHtml(uniqueVessels);
+
   return `
     <!DOCTYPE html>
     <html lang="en">
@@ -302,13 +463,22 @@ function generateGroupedHtmlTable(clientName, trips) {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>${clientName} - Upcoming Vessel Trips | SeaLink Gladstone</title>
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
         .container { max-width: 1100px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
         .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #00529b; padding-bottom: 12px; margin-bottom: 20px; }
         h1 { color: #00529b; margin: 0; font-size: 24px; }
         .timestamp { font-size: 12px; color: #666; }
-        
+
+        /* Live Vessel Map Panel */
+        .map-panel { border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; margin-bottom: 24px; }
+        .map-panel-header { background: #00529b; color: #fff; padding: 12px 16px; font-size: 15px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
+        .map-updated-label { font-size: 12px; font-weight: normal; opacity: 0.85; }
+        #vessel-map { height: 320px; width: 100%; }
+        .vessel-marker-icon { font-size: 22px; text-align: center; line-height: 26px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+
         /* Filter Control Bar */
         .filter-panel { background: #f0f4f8; border: 1px solid #d0dbe5; border-radius: 6px; padding: 16px; margin-bottom: 24px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
         .filter-group { display: flex; flex-direction: column; gap: 6px; }
@@ -329,17 +499,17 @@ function generateGroupedHtmlTable(clientName, trips) {
         .schedule-table { width: 100%; border-collapse: collapse; }
         .schedule-table th, .schedule-table td { text-align: left; padding: 11px 14px; border-bottom: 1px solid #e1e4e8; }
         .schedule-table th { background-color: #f8f9fa; color: #555; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        
+
         .route-cell { font-weight: normal; color: #333; }
 
         /* Run Type Specific Styling */
         .run-type-italic { font-style: italic; color: #555; font-weight: normal; }
         .run-type-scheduled-text { font-weight: bold; color: #0a3663; }
-        
+
         /* SCHEDULED RUN ROW: Entire row fully bolded with pleasant blue background */
         .scheduled-run-row { background-color: #e8f4fd; font-weight: bold; color: #0a3663; border-left: 4px solid #00529b; }
         .scheduled-run-row td { color: #0a3663; font-weight: bold; }
-        
+
         /* EXTRA RUN ROW: Light orange background & orange badge */
         .extra-run-row { background-color: #fffaf0; }
         .run-type-extra-badge { background-color: #ffe8cc; color: #d97706; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; border: 1px solid #fbd38d; display: inline-block; }
@@ -357,6 +527,8 @@ function generateGroupedHtmlTable(clientName, trips) {
           </div>
           <div class="timestamp">Updated: ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })} AEST</div>
         </div>
+
+        ${mapHtml}
 
         <!-- Filter Controls -->
         <div class="filter-panel">
