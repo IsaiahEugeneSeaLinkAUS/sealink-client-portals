@@ -340,6 +340,24 @@ function generateVesselMapHtml(relevantVesselNames) {
           iconSize: [26, 26]
         });
 
+        // Short codes for the map label - falls back to the full name (as
+        // given) for any vessel not in this list, so a new or unmapped
+        // vessel still shows something rather than nothing.
+        var VESSEL_SHORT_NAMES = {
+          'goodna': 'GOOD',
+          'brahminy kite': 'BRKI',
+          'parangool': 'PARA',
+          'capricornian spirit': 'SPIR',
+          'james grant': 'JAGR',
+          'torresian': 'TORR',
+          'trojan': 'TROJ'
+        };
+
+        function shortNameFor(vesselName) {
+          var key = (vesselName || '').trim().toLowerCase();
+          return VESSEL_SHORT_NAMES[key] || vesselName;
+        }
+
         var markers = {};
         var refreshBtn = document.getElementById('refresh-positions-btn');
 
@@ -358,7 +376,13 @@ function generateVesselMapHtml(relevantVesselNames) {
               } else {
                 markers[v.name] = L.marker([v.lat, v.lon], { icon: shipIcon })
                   .addTo(map)
-                  .bindPopup(popupHtml);
+                  .bindPopup(popupHtml)
+                  .bindTooltip(shortNameFor(v.name), {
+                    permanent: true,
+                    direction: 'top',
+                    offset: [0, -8],
+                    className: 'vessel-label'
+                  });
               }
             });
 
@@ -608,6 +632,8 @@ function generateGroupedHtmlTable(clientName, trips) {
         .map-updated-label { font-size: 12px; font-weight: normal; opacity: 0.85; }
         #vessel-map { height: 320px; width: 100%; }
         .vessel-marker-icon { font-size: 22px; text-align: center; line-height: 26px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+        .leaflet-tooltip.vessel-label { background: #00529b; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold; letter-spacing: 0.3px; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+        .leaflet-tooltip.vessel-label::before { border-top-color: #00529b; }
 
         /* Filter Control Bar */
         .filter-panel { background: #f0f4f8; border: 1px solid #d0dbe5; border-radius: 6px; padding: 16px; margin-bottom: 24px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
