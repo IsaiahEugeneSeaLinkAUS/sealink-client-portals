@@ -122,6 +122,14 @@ async function generateSites() {
     headers['Api-Key'] = API_KEY;
   }
 
+  // Kick this off now and only await it once we actually need it below -
+  // it's completely independent of the Helm CSV work, so there's no reason
+  // to make it wait in line behind the CSV fetch/parse/processing.
+  const onWatchPromise = fetchOnWatchPositions().catch(err => {
+    console.error('Could not fetch OnWatch positions:', err.message);
+    return [];
+  });
+
   const response = await fetch(CSV_URL, { headers });
   console.log(`HTTP Fetch Status: ${response.status} ${response.statusText}`);
 
@@ -190,18 +198,13 @@ async function generateSites() {
   console.log(`Deduplicated and sorted down to ${validTrips.length} upcoming confirmed trips.`);
 
   // ---------------------------------------------------------------------------
-  // 4b. FETCH LIVE VESSEL POSITIONS (OnWatch VMS)
+  // 4b. LIVE VESSEL POSITIONS (OnWatch VMS) - fetch was already kicked off
+  // above, in parallel with the Helm CSV work, so this is usually an
+  // instant await rather than another round trip.
   // ---------------------------------------------------------------------------
-  let positions = [];
-  try {
-    const rawPositions = await fetchOnWatchPositions();
-    positions = normalizeOnWatchPositions(rawPositions);
-    console.log(`Fetched ${positions.length} vessel position(s) from OnWatch.`);
-  } catch (err) {
-    // Never let a position-fetch problem break the schedule build - just
-    // ship the site without fresh positions and log it for follow-up.
-    console.error('Could not fetch OnWatch positions:', err.message);
-  }
+  const rawPositions = await onWatchPromise;
+  const positions = normalizeOnWatchPositions(rawPositions);
+  console.log(`Fetched ${positions.length} vessel position(s) from OnWatch.`);
 
   const publicDir = path.join(__dirname, 'public');
   if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
@@ -277,7 +280,17 @@ function formatRunTypeHtml(runTypeStr) {
 // fetchOnWatchPositions() above. On GitHub Pages there's no server to poll
 // live, so "live" here really means "as fresh as the last GitHub Actions
 // run" (plus a little GitHub CDN caching) - see the workflow schedule for
+// ---------------------------------------------------------------------------
 // how often that is.
+//
+// The "Refresh" button fires the Power Automate HTTP-triggered flow that
+// kicks off the same GitHub Actions rebuild - see the note in chat about
+// setting POWER_AUTOMATE_REFRESH_URL below. It's a fire-and-forget POST:
+// mode: 'no-cors' is used deliberately, since Power Automate's HTTP trigger
+// doesn't reliably send CORS headers a browser can read, and we don't need
+// to read the response anyway - we just need the request to go out.
+const POWER_AUTOMATE_REFRESH_URL = ''; // TODO: paste your flow's HTTP POST URL here
+
 function generateVesselMapHtml(relevantVesselNames) {
   if (relevantVesselNames.length === 0) return '';
 
@@ -285,13 +298,19 @@ function generateVesselMapHtml(relevantVesselNames) {
     <div class="map-panel">
       <div class="map-panel-header">
         🛰️ Live Vessel Position
-        <span id="map-updated" class="map-updated-label">Loading…</span>
+        <span class="map-header-right">
+          <button id="refresh-positions-btn" class="btn-refresh-map" type="button">↻ Refresh</button>
+          <span id="map-updated" class="map-updated-label">Loading…</span>
+        </span>
       </div>
       <div id="vessel-map"></div>
     </div>
     <script>
       (function () {
         var relevantVessels = ${JSON.stringify(relevantVesselNames)}.map(function (n) { return n.trim().toLowerCase(); });
+        var powerAutomateUrl = ${JSON.stringify(POWER_AUTOMATE_REFRESH_URL)};
+        var REFRESH_COOLDOWN_MS = 90000; // matches a realistic build+deploy time - also caps how often this can fire
+
         var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.83, 151.25], 11);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -306,12 +325,11 @@ function generateVesselMapHtml(relevantVesselNames) {
         });
 
         var markers = {};
+        var refreshBtn = document.getElementById('refresh-positions-btn');
 
+        // Passive re-fetch of whatever's currently published. Runs on load,
+        // every 60s automatically, and once right after a rebuild request.
         function refreshPositions() {
-          // Relative path: works whether this site is served at a custom
-          // domain root or under a GitHub Pages project path like
-          // /repo-name/. Add a cache-busting query param since GitHub
-          // Pages' CDN will otherwise hold onto the old file for a while.
           fetch('../positions.json?t=' + Date.now())
             .then(function (res) { return res.json(); })
             .then(function (data) {
@@ -340,6 +358,50 @@ function generateVesselMapHtml(relevantVesselNames) {
             .catch(function (err) {
               console.error('Could not refresh vessel positions', err);
             });
+        }
+
+        // Active: ask Power Automate to kick off a brand-new OnWatch pull +
+        // rebuild, then show the freshest published data straight away and
+        // let the normal 60s poll pick up the new build once it lands.
+        function requestFreshRebuild() {
+          if (!refreshBtn) return;
+
+          if (!powerAutomateUrl) {
+            console.warn('POWER_AUTOMATE_REFRESH_URL is not set - button will only re-check existing data.');
+            refreshPositions();
+            return;
+          }
+
+          refreshBtn.disabled = true;
+          refreshBtn.textContent = '↻ Requesting…';
+
+          fetch(powerAutomateUrl, { method: 'POST', mode: 'no-cors' })
+            .catch(function (err) {
+              console.error('Could not reach Power Automate trigger', err);
+            })
+            .finally(function () {
+              refreshPositions();
+              refreshBtn.textContent = '↻ Refreshing data…';
+
+              // Cooldown - stops rapid re-clicks from spamming Power
+              // Automate / cancelling GitHub's in-flight build over and
+              // over. Countdown text just keeps the wait understandable.
+              var secondsLeft = Math.round(REFRESH_COOLDOWN_MS / 1000);
+              var countdown = setInterval(function () {
+                secondsLeft -= 1;
+                if (secondsLeft <= 0) {
+                  clearInterval(countdown);
+                  refreshBtn.disabled = false;
+                  refreshBtn.textContent = '↻ Refresh';
+                } else {
+                  refreshBtn.textContent = '↻ Wait ' + secondsLeft + 's';
+                }
+              }, 1000);
+            });
+        }
+
+        if (refreshBtn) {
+          refreshBtn.addEventListener('click', requestFreshRebuild);
         }
 
         refreshPositions();
@@ -475,6 +537,10 @@ function generateGroupedHtmlTable(clientName, trips) {
         /* Live Vessel Map Panel */
         .map-panel { border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; margin-bottom: 24px; }
         .map-panel-header { background: #00529b; color: #fff; padding: 12px 16px; font-size: 15px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
+        .map-header-right { display: flex; align-items: center; gap: 12px; }
+        .btn-refresh-map { background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.4); border-radius: 4px; padding: 5px 10px; font-size: 12px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        .btn-refresh-map:hover:not(:disabled) { background: rgba(255,255,255,0.3); }
+        .btn-refresh-map:disabled { opacity: 0.6; cursor: default; }
         .map-updated-label { font-size: 12px; font-weight: normal; opacity: 0.85; }
         #vessel-map { height: 320px; width: 100%; }
         .vessel-marker-icon { font-size: 22px; text-align: center; line-height: 26px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
