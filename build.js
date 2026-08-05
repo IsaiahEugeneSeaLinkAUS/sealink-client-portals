@@ -463,11 +463,11 @@ function generateGroupedHtmlTable(clientName, trips) {
             <table class="schedule-table">
               <thead>
                 <tr>
-                  <th style="width: 20%;">Run Type</th>
-                  <th style="width: 35%;">Route</th>
-                  <th style="width: 15%;">Dep Time</th>
-                  <th style="width: 15%;">Arr Time</th>
-                  <th style="width: 15%;">Status</th>
+                  <th>Run Type</th>
+                  <th>Route</th>
+                  <th>Dep Time</th>
+                  <th>Arr Time</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -568,8 +568,8 @@ function generateGroupedHtmlTable(clientName, trips) {
 
         /* Schedule Tables */
         .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        .schedule-table { width: 100%; min-width: 560px; border-collapse: collapse; }
-        .schedule-table th, .schedule-table td { text-align: left; padding: 11px 14px; border-bottom: 1px solid #e1e4e8; white-space: nowrap; }
+        .schedule-table { border-collapse: collapse; }
+        .schedule-table th, .schedule-table td { text-align: left; padding: 9px 14px; border-bottom: 1px solid #e1e4e8; white-space: nowrap; }
         .schedule-table th { background-color: #f8f9fa; color: #555; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
         .route-cell { white-space: normal; }
 
@@ -601,7 +601,8 @@ function generateGroupedHtmlTable(clientName, trips) {
           #vessel-map { height: 240px; }
           .filter-panel { padding: 12px; gap: 10px; }
           .filter-group select, .filter-group input { min-width: 130px; }
-          .schedule-table th, .schedule-table td { padding: 9px 10px; font-size: 13px; }
+          .schedule-table th, .schedule-table td { padding: 8px 8px; font-size: 12.5px; }
+          .vessel-block { margin: 10px; }
         }
       </style>
     </head>
