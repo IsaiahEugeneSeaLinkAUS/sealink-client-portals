@@ -27,6 +27,24 @@ const CLIENT_CONFIG = [
   { name: 'Queensland Gas Company', slug: 'qgc-z8w7' }
 ];
 
+// ---------------------------------------------------------------------------
+// 2b. STOP COORDINATES (for departed/delayed/arrived status + map labels)
+// ---------------------------------------------------------------------------
+// From OnWatch's Stops list. Maintenance Slipway, Maintenance Wharf, and
+// Service Wharf deliberately excluded - not operational client stops.
+// `aliases` should cover every way Helm's Location From/To Name text might
+// spell this stop - matched case/whitespace-insensitively. Add more here
+// if a stop ever fails to match in practice.
+const STOPS = [
+  { name: 'CP1', aliases: ['cp1'], lat: -23.78493, lon: 151.16916 },
+  { name: 'CP3', aliases: ['cp3'], lat: -23.75329, lon: 151.17814 },
+  { name: 'GL3', aliases: ['gl3'], lat: -23.82395, lon: 151.24208 },
+  { name: 'GL4', aliases: ['gl4'], lat: -23.79165, lon: 151.21203 },
+  { name: 'QC3', aliases: ['qc3'], lat: -23.77970, lon: 151.19851 },
+  { name: 'QC4', aliases: ['qc4'], lat: -23.76711, lon: 151.18861 },
+  { name: 'Marina', aliases: ['marina', 'sealink marina', 'gladstone marina'], lat: -23.82783, lon: 151.24350 }
+];
+
 // Helper to parse Helm CSV date strings as explicit Brisbane time (UTC+10)
 function parseHelmDate(dateStr) {
   if (!dateStr) {
@@ -358,26 +376,143 @@ function generateVesselMapHtml(relevantVesselNames) {
           return VESSEL_SHORT_NAMES[key] || vesselName;
         }
 
+        // Stop coordinates, aliases, and the thresholds used to decide
+        // whether a vessel counts as "at" a given stop right now. Same
+        // list as build.js's STOPS - kept here since this all runs
+        // client-side, computed against whatever time it is when the
+        // browser checks, not build time.
+        var STOPS = ${JSON.stringify(STOPS)};
+        var STOP_BY_ALIAS = {};
+        STOPS.forEach(function (stop) {
+          stop.aliases.forEach(function (alias) { STOP_BY_ALIAS[alias] = stop; });
+        });
+
+        var AT_STOP_RADIUS_M = 100;
+        var AT_STOP_SLOW_RADIUS_M = 150; // wider allowance when clearly stationary, to absorb GPS jitter
+        var AT_STOP_SPEED_KN = 1.0;
+        var DELAY_GRACE_MIN = 2;
+        var ARRIVED_WINDOW_MIN = 10;
+        var DELAY_STALE_HOURS = 3; // ignore a row's departure time if it's this far in the past - avoids flagging long-finished runs
+
+        // Haversine distance in meters between two lat/lon points.
+        function distanceMeters(lat1, lon1, lat2, lon2) {
+          var R = 6371000;
+          var toRad = function (d) { return d * Math.PI / 180; };
+          var dLat = toRad(lat2 - lat1);
+          var dLon = toRad(lon2 - lon1);
+          var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+          return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        function isNearStop(vessel, stop) {
+          if (!stop) return false;
+          var d = distanceMeters(vessel.lat, vessel.lon, stop.lat, stop.lon);
+          if (d <= AT_STOP_RADIUS_M) return true;
+          if (typeof vessel.speedKn === 'number' && vessel.speedKn < AT_STOP_SPEED_KN && d <= AT_STOP_SLOW_RADIUS_M) return true;
+          return false;
+        }
+
+        // Which known stop (if any) is this vessel currently sitting at -
+        // used for the "GOOD CP1" style map label, independent of any
+        // particular scheduled run.
+        function nearestStopName(vessel) {
+          for (var i = 0; i < STOPS.length; i++) {
+            if (isNearStop(vessel, STOPS[i])) return STOPS[i].name;
+          }
+          return null;
+        }
+
         var markers = {};
         var refreshBtn = document.getElementById('refresh-positions-btn');
+
+        // Departed / Delayed / Arrived, computed fresh every check from the
+        // schedule's own times vs right now - no history or persisted
+        // state needed. Returns null when the build-time "Confirmed" badge
+        // should just be left alone (not due yet, too long ago to still be
+        // live-tracked, or sitting at destination outside the arrived window).
+        function computeRunStatus(row, vessel, now) {
+          var depTs = parseInt(row.getAttribute('data-dep-ts'), 10);
+          var arrTs = parseInt(row.getAttribute('data-arr-ts'), 10);
+          if (!depTs || now < depTs) return null;
+
+          var origin = STOP_BY_ALIAS[row.getAttribute('data-from')];
+          var dest = STOP_BY_ALIAS[row.getAttribute('data-to')];
+          if (!origin) return null; // can't assess delay without knowing where it started from
+
+          var atOrigin = isNearStop(vessel, origin);
+
+          if (atOrigin) {
+            var overdueMin = Math.round((now - depTs) / 60000);
+            if (overdueMin > DELAY_GRACE_MIN && overdueMin <= DELAY_STALE_HOURS * 60) {
+              return { text: 'Delayed ' + overdueMin + 'min', className: 'badge-delayed' };
+            }
+            return null;
+          }
+
+          // Left the origin. "Arrived" is anchored to the SCHEDULED arrival
+          // time, not to precisely detecting the vessel inside the
+          // destination geofence - real-world docking position/GPS lag
+          // doesn't always land inside that radius exactly on the minute,
+          // and requiring it meant a slightly-off detection could skip
+          // "Arrived" entirely and jump straight back to Confirmed. Being
+          // physically at the destination still counts (covers early
+          // arrivals, before the scheduled time), but reaching the
+          // scheduled time is enough on its own too.
+          var atDest = dest && isNearStop(vessel, dest);
+          var arrivedWindowOpen = arrTs && now <= arrTs + ARRIVED_WINDOW_MIN * 60000;
+
+          if (arrivedWindowOpen && (atDest || now >= arrTs)) {
+            return { text: 'Arrived', className: 'badge-arrived' };
+          }
+
+          if (!arrivedWindowOpen) return null; // past the arrived window - drop back to Confirmed
+
+          if ((now - depTs) <= DELAY_STALE_HOURS * 3600000) {
+            return { text: 'Departed', className: 'badge-departed' };
+          }
+          return null;
+        }
+
+        function updateRowStatuses(vesselByName) {
+          var now = Date.now();
+          document.querySelectorAll('.data-row').forEach(function (row) {
+            var vesselName = row.getAttribute('data-vessel');
+            var vessel = vesselByName[vesselName];
+            var badge = row.querySelector('.status-badge');
+            if (!vessel || !badge) return;
+
+            var result = computeRunStatus(row, vessel, now);
+            badge.className = 'badge status-badge' + (result ? ' ' + result.className : '');
+            badge.textContent = result ? result.text : badge.getAttribute('data-original-status');
+          });
+        }
 
         // Shared renderer - both the live proxy and the static snapshot
         // feed into this once normalized to the same {name, lat, lon,
         // speedKn} shape, so marker-drawing logic only lives in one place.
         function applyPositions(vessels, labelText) {
+          var vesselByName = {};
+
           vessels
             .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
             .forEach(function (v) {
+              vesselByName[(v.name || '').trim().toLowerCase()] = v;
+
               var popupHtml = '<strong>' + v.name + '</strong><br>' +
                 (typeof v.speedKn === 'number' ? v.speedKn.toFixed(1) + ' kn' : 'Speed unavailable');
 
+              var stopName = nearestStopName(v);
+              var labelHtml = shortNameFor(v.name) + (stopName ? ' ' + stopName : '');
+
               if (markers[v.name]) {
-                markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml);
+                markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml).setTooltipContent(labelHtml);
               } else {
                 markers[v.name] = L.marker([v.lat, v.lon], { icon: shipIcon })
                   .addTo(map)
                   .bindPopup(popupHtml)
-                  .bindTooltip(shortNameFor(v.name), {
+                  .bindTooltip(labelHtml, {
                     permanent: true,
                     direction: 'top',
                     offset: [0, -8],
@@ -385,6 +520,8 @@ function generateVesselMapHtml(relevantVesselNames) {
                   });
               }
             });
+
+          updateRowStatuses(vesselByName);
 
           var updatedEl = document.getElementById('map-updated');
           if (updatedEl) updatedEl.textContent = labelText;
@@ -579,12 +716,16 @@ function generateGroupedHtmlTable(clientName, trips) {
             <tr class="${rowClass}"
                 data-vessel="${vesselName.toLowerCase()}"
                 data-runtype="${runTypeRaw.toLowerCase()}"
-                data-date="${isoDate}">
+                data-date="${isoDate}"
+                data-dep-ts="${parsedStart.timestamp}"
+                data-arr-ts="${parsedEnd.timestamp}"
+                data-from="${depLoc.trim().toLowerCase()}"
+                data-to="${arrLoc.trim().toLowerCase()}">
               <td>${runTypeHtml}</td>
               <td class="route-cell">${routeText}</td>
               <td>${depTime}</td>
               <td>${arrTime}</td>
-              <td><span class="badge">${status}</span></td>
+              <td><span class="badge status-badge" data-original-status="${status}">${status}</span></td>
             </tr>
           `;
         });
@@ -673,6 +814,9 @@ function generateGroupedHtmlTable(clientName, trips) {
         .run-type-extra-badge { background-color: #ffe8cc; color: #d97706; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; border: 1px solid #fbd38d; display: inline-block; }
 
         .badge { background: #e6f4ea; color: #137333; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+        .badge-departed { background: #e3edfb; color: #1a56b0; }
+        .badge-delayed { background: #fdecea; color: #c0392b; }
+        .badge-arrived { background: #e0f6f4; color: #067a6f; }
         .no-results { display: none; text-align: center; padding: 40px; color: #888; font-size: 15px; }
 
         /* Mobile */
