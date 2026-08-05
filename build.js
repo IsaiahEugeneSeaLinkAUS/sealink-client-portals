@@ -209,6 +209,14 @@ async function generateSites() {
   const publicDir = path.join(__dirname, 'public');
   if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
 
+  // Copy the committed favicon into the build output, if it's there.
+  const faviconSrc = path.join(__dirname, 'favicon.png');
+  if (fs.existsSync(faviconSrc)) {
+    fs.copyFileSync(faviconSrc, path.join(publicDir, 'favicon.png'));
+  } else {
+    console.warn('favicon.png not found at repo root - tab icon will be broken until it is added.');
+  }
+
   // Static positions file, served alongside the client pages on GitHub
   // Pages. No credentials in here - just the position snapshot from this
   // build run. Client pages fetch this via a relative path.
@@ -220,7 +228,7 @@ async function generateSites() {
   // Root Landing Page
   fs.writeFileSync(path.join(publicDir, 'index.html'), `
     <!DOCTYPE html>
-    <html><head><title>SeaLink Gladstone Portal</title></head>
+    <html><head><title>SeaLink Gladstone Portal</title><link rel="icon" type="image/png" href="favicon.png"></head>
     <body style="font-family:sans-serif; text-align:center; padding:50px;">
       <h2>SeaLink Gladstone Operations Portal</h2>
       <p>Please use your direct client portal link to view upcoming schedules.</p>
@@ -291,6 +299,13 @@ function formatRunTypeHtml(runTypeStr) {
 // to read the response anyway - we just need the request to go out.
 const POWER_AUTOMATE_REFRESH_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/15/workflows/acd148e9258345fe9d06ea0c27ccbe18/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=EeYMoctJ_NBYz8naEbTZ4ocKDiJGUV-wvedCFaWkMFA';
 
+// Optional: a second HTTP-triggered Power Automate flow that calls OnWatch
+// directly and returns its raw response (see chat for the setup steps).
+// When this is set, position polling bypasses the rebuild cycle entirely -
+// genuinely live, bounded only by OnWatch's own ~2 min GPS reporting lag.
+// Left blank, the map just falls back to whatever positions.json says.
+const LIVE_POSITION_PROXY_URL = ''; // TODO: paste your live-proxy flow's HTTP POST URL here
+
 function generateVesselMapHtml(relevantVesselNames) {
   if (relevantVesselNames.length === 0) return '';
 
@@ -309,6 +324,7 @@ function generateVesselMapHtml(relevantVesselNames) {
       (function () {
         var relevantVessels = ${JSON.stringify(relevantVesselNames)}.map(function (n) { return n.trim().toLowerCase(); });
         var powerAutomateUrl = ${JSON.stringify(POWER_AUTOMATE_REFRESH_URL)};
+        var liveProxyUrl = ${JSON.stringify(LIVE_POSITION_PROXY_URL)};
         var REFRESH_COOLDOWN_MS = 90000; // matches a realistic build+deploy time - also caps how often this can fire
 
         var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.83, 151.25], 11);
@@ -327,37 +343,79 @@ function generateVesselMapHtml(relevantVesselNames) {
         var markers = {};
         var refreshBtn = document.getElementById('refresh-positions-btn');
 
-        // Passive re-fetch of whatever's currently published. Runs on load,
-        // every 60s automatically, and once right after a rebuild request.
-        function refreshPositions() {
+        // Shared renderer - both the live proxy and the static snapshot
+        // feed into this once normalized to the same {name, lat, lon,
+        // speedKn} shape, so marker-drawing logic only lives in one place.
+        function applyPositions(vessels, labelText) {
+          vessels
+            .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
+            .forEach(function (v) {
+              var popupHtml = '<strong>' + v.name + '</strong><br>' +
+                (typeof v.speedKn === 'number' ? v.speedKn.toFixed(1) + ' kn' : 'Speed unavailable');
+
+              if (markers[v.name]) {
+                markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml);
+              } else {
+                markers[v.name] = L.marker([v.lat, v.lon], { icon: shipIcon })
+                  .addTo(map)
+                  .bindPopup(popupHtml);
+              }
+            });
+
+          var updatedEl = document.getElementById('map-updated');
+          if (updatedEl) updatedEl.textContent = labelText;
+        }
+
+        // Fallback: whatever was baked in at the last GitHub Pages build.
+        function fetchStaticSnapshot() {
           fetch('../positions.json?t=' + Date.now())
             .then(function (res) { return res.json(); })
             .then(function (data) {
-              (data.vessels || [])
-                .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
-                .forEach(function (v) {
-                  var popupHtml = '<strong>' + v.name + '</strong><br>' +
-                    (typeof v.speedKn === 'number' ? v.speedKn.toFixed(1) + ' kn' : 'Speed unavailable');
-
-                  if (markers[v.name]) {
-                    markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml);
-                  } else {
-                    markers[v.name] = L.marker([v.lat, v.lon], { icon: shipIcon })
-                      .addTo(map)
-                      .bindPopup(popupHtml);
-                  }
-                });
-
-              var updatedEl = document.getElementById('map-updated');
-              if (updatedEl) {
-                updatedEl.textContent = data.fetchedAt
-                  ? 'Updated ' + new Date(data.fetchedAt).toLocaleTimeString('en-AU', { timeZone: 'Australia/Brisbane' }) + ' AEST'
-                  : 'Position data unavailable';
-              }
+              var labelText = data.fetchedAt
+                ? 'Updated ' + new Date(data.fetchedAt).toLocaleTimeString('en-AU', { timeZone: 'Australia/Brisbane' }) + ' AEST'
+                : 'Position data unavailable';
+              applyPositions(data.vessels || [], labelText);
             })
             .catch(function (err) {
-              console.error('Could not refresh vessel positions', err);
+              console.error('Could not fetch static position snapshot', err);
             });
+        }
+
+        // Live: call OnWatch directly via the Power Automate proxy, bypassing
+        // the rebuild cycle. Parses OnWatch's raw response shape client-side
+        // since the proxy just passes it straight through.
+        function fetchLivePositions() {
+          fetch(liveProxyUrl)
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+              var raw = data.data || data.vessels || [];
+              var normalized = raw.map(function (v) {
+                return {
+                  name: v.vessel_name || v.vessel_id || 'Unknown',
+                  lat: v.latitude,
+                  lon: v.longitude,
+                  speedKn: v.speed_over_ground && v.speed_over_ground.value
+                };
+              }).filter(function (v) { return typeof v.lat === 'number' && typeof v.lon === 'number'; });
+
+              var labelText = 'Live - checked ' + new Date().toLocaleTimeString('en-AU', { timeZone: 'Australia/Brisbane' }) + ' AEST';
+              applyPositions(normalized, labelText);
+            })
+            .catch(function (err) {
+              console.error('Live position proxy failed, falling back to static snapshot', err);
+              fetchStaticSnapshot();
+            });
+        }
+
+        // Passive re-fetch, used on load, every 60s automatically, and once
+        // right after a rebuild request. Prefers the live proxy when it's
+        // configured; otherwise just re-checks the static snapshot.
+        function refreshPositions() {
+          if (liveProxyUrl) {
+            fetchLivePositions();
+          } else {
+            fetchStaticSnapshot();
+          }
         }
 
         // Active: ask Power Automate to kick off a brand-new OnWatch pull +
@@ -528,6 +586,7 @@ function generateGroupedHtmlTable(clientName, trips) {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>${clientName} - Upcoming Vessel Trips | SeaLink Gladstone</title>
+      <link rel="icon" type="image/png" href="../favicon.png">
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
       <style>
