@@ -559,11 +559,11 @@ function generateGroupedHtmlTable(clientName, trips) {
         .btn-reset:hover { background: #003a6e; }
 
         /* Day Block Styling */
-        .day-block { margin-bottom: 32px; border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; background: #fff; }
+        .day-block { margin-bottom: 32px; border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; background: #fff; width: fit-content; max-width: 100%; }
         .day-header-banner { background: #00529b; color: #fff; padding: 14px 18px; font-size: 17px; font-weight: bold; letter-spacing: 0.3px; }
 
         /* Vessel Sub-Block Styling */
-        .vessel-block { margin: 16px; border: 1px solid #d0dbe5; border-radius: 6px; overflow: hidden; background: #fff; }
+        .vessel-block { margin: 16px; border: 1px solid #d0dbe5; border-radius: 6px; overflow: hidden; background: #fff; width: fit-content; max-width: calc(100% - 32px); }
         .vessel-sub-header { background: #e8f1f8; color: #00529b; padding: 10px 14px; font-size: 14px; font-weight: bold; border-bottom: 1px solid #d0dbe5; }
 
         /* Schedule Tables */
@@ -602,7 +602,7 @@ function generateGroupedHtmlTable(clientName, trips) {
           .filter-panel { padding: 12px; gap: 10px; }
           .filter-group select, .filter-group input { min-width: 130px; }
           .schedule-table th, .schedule-table td { padding: 8px 8px; font-size: 12.5px; }
-          .vessel-block { margin: 10px; }
+          .vessel-block { margin: 10px; max-width: calc(100% - 20px); }
         }
       </style>
     </head>
