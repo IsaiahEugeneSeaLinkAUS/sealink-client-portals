@@ -1,1 +1,0 @@
-# sealink-client-portals
