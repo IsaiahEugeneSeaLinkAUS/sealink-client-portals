@@ -559,7 +559,7 @@ function generateGroupedHtmlTable(clientName, trips) {
         .btn-reset:hover { background: #003a6e; }
 
         /* Day Block Styling */
-        .day-block { margin-bottom: 32px; border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; background: #fff; width: fit-content; max-width: 100%; }
+        .day-block { margin: 0 auto 32px; border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; background: #fff; width: fit-content; max-width: 100%; }
         .day-header-banner { background: #00529b; color: #fff; padding: 14px 18px; font-size: 17px; font-weight: bold; letter-spacing: 0.3px; }
 
         /* Vessel Sub-Block Styling */
