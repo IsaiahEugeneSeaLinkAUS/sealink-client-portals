@@ -289,7 +289,7 @@ function formatRunTypeHtml(runTypeStr) {
 // mode: 'no-cors' is used deliberately, since Power Automate's HTTP trigger
 // doesn't reliably send CORS headers a browser can read, and we don't need
 // to read the response anyway - we just need the request to go out.
-const POWER_AUTOMATE_REFRESH_URL = ''; // TODO: paste your flow's HTTP POST URL here
+const POWER_AUTOMATE_REFRESH_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/15/workflows/acd148e9258345fe9d06ea0c27ccbe18/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=EeYMoctJ_NBYz8naEbTZ4ocKDiJGUV-wvedCFaWkMFA';
 
 function generateVesselMapHtml(relevantVesselNames) {
   if (relevantVesselNames.length === 0) return '';
@@ -393,6 +393,7 @@ function generateVesselMapHtml(relevantVesselNames) {
                   clearInterval(countdown);
                   refreshBtn.disabled = false;
                   refreshBtn.textContent = '↻ Refresh';
+                  refreshPositions(); // one more check - the rebuild should have landed by now
                 } else {
                   refreshBtn.textContent = '↻ Wait ' + secondsLeft + 's';
                 }
@@ -458,6 +459,7 @@ function generateGroupedHtmlTable(clientName, trips) {
             <div class="vessel-sub-header">
               🚢 Vessel: <strong>${vesselName}</strong>
             </div>
+            <div class="table-scroll">
             <table class="schedule-table">
               <thead>
                 <tr>
@@ -508,6 +510,7 @@ function generateGroupedHtmlTable(clientName, trips) {
         contentHtml += `
               </tbody>
             </table>
+            </div>
           </div>
         `;
       }
@@ -528,11 +531,13 @@ function generateGroupedHtmlTable(clientName, trips) {
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
       <style>
+        * { box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
         .container { max-width: 1100px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
         .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #00529b; padding-bottom: 12px; margin-bottom: 20px; }
         h1 { color: #00529b; margin: 0; font-size: 24px; }
-        .timestamp { font-size: 12px; color: #666; }
+        .timestamp { font-size: 12px; color: #666; text-align: right; }
+        .refresh-note { font-size: 11px; color: #888; margin-top: 4px; }
 
         /* Live Vessel Map Panel */
         .map-panel { border: 1px solid #c4d7e6; border-radius: 6px; overflow: hidden; margin-bottom: 24px; }
@@ -562,9 +567,11 @@ function generateGroupedHtmlTable(clientName, trips) {
         .vessel-sub-header { background: #e8f1f8; color: #00529b; padding: 10px 14px; font-size: 14px; font-weight: bold; border-bottom: 1px solid #d0dbe5; }
 
         /* Schedule Tables */
-        .schedule-table { width: 100%; border-collapse: collapse; }
-        .schedule-table th, .schedule-table td { text-align: left; padding: 11px 14px; border-bottom: 1px solid #e1e4e8; }
+        .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        .schedule-table { width: 100%; min-width: 560px; border-collapse: collapse; }
+        .schedule-table th, .schedule-table td { text-align: left; padding: 11px 14px; border-bottom: 1px solid #e1e4e8; white-space: nowrap; }
         .schedule-table th { background-color: #f8f9fa; color: #555; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .route-cell { white-space: normal; }
 
         .route-cell { font-weight: normal; color: #333; }
 
@@ -582,6 +589,20 @@ function generateGroupedHtmlTable(clientName, trips) {
 
         .badge { background: #e6f4ea; color: #137333; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
         .no-results { display: none; text-align: center; padding: 40px; color: #888; font-size: 15px; }
+
+        /* Mobile */
+        @media (max-width: 640px) {
+          body { padding: 10px; }
+          .container { padding: 14px; }
+          .header { flex-direction: column; align-items: flex-start; gap: 6px; }
+          .timestamp { text-align: left; }
+          h1 { font-size: 20px; }
+          .map-panel-header { flex-wrap: wrap; gap: 8px; }
+          #vessel-map { height: 240px; }
+          .filter-panel { padding: 12px; gap: 10px; }
+          .filter-group select, .filter-group input { min-width: 130px; }
+          .schedule-table th, .schedule-table td { padding: 9px 10px; font-size: 13px; }
+        }
       </style>
     </head>
     <body>
@@ -591,7 +612,10 @@ function generateGroupedHtmlTable(clientName, trips) {
             <h1>${clientName} Schedule</h1>
             <p style="margin: 4px 0 0 0; color: #666;">SeaLink Gladstone Operational Portal</p>
           </div>
-          <div class="timestamp">Updated: ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })} AEST</div>
+          <div>
+            <div class="timestamp">Updated: ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' })} AEST</div>
+            <div class="refresh-note">Schedule data refreshes automatically every 10 minutes</div>
+          </div>
         </div>
 
         ${mapHtml}
