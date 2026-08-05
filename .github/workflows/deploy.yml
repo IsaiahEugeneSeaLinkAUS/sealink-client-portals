@@ -1,10 +1,13 @@
 name: Build and deploy client schedule sites
 
 on:
+  repository_dispatch:
+    types: [rebuild-request] # matches the Event Name set in Power Automate's "Create a repository dispatch event" action
   schedule:
-    # Every 10 minutes. See the note in chat about GitHub's actual cron
-    # reliability and Actions-minutes cost before tightening this further.
-    - cron: '*/10 * * * *'
+    # Safety-net only - Power Automate's GitHub connector now drives the
+    # real cadence via repository_dispatch above; this hourly run just
+    # guarantees a rebuild happens even if that call ever fails.
+    - cron: '0 * * * *'
   workflow_dispatch: {} # lets you trigger a rebuild manually from the Actions tab
   push:
     branches: [main]
