@@ -22,22 +22,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # Merged into one job (was previously build + deploy as two separate
+  # jobs). Two jobs meant two full runner spin-ups plus an upload/download
+  # hand-off of the artifact between them - none of which this small site
+  # needs. One job removes that whole layer of overhead.
+  build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Debug - list repo root
-        run: ls -la
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm # needs package-lock.json committed alongside this workflow
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build client sites
         env:
@@ -52,13 +57,6 @@ jobs:
         with:
           path: public
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
