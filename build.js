@@ -368,21 +368,37 @@ function generateVesselMapHtml(relevantVesselNames) {
           var underway = typeof vessel.speedKn === 'number' && vessel.speedKn > UNDERWAY_SPEED_KN;
           var heading = typeof vessel.headingDeg === 'number' ? vessel.headingDeg : 0;
 
-          var arrowSvg = underway
-            ? '<polygon points="14,1 18,11 14,8 10,11" fill="#d97706" stroke="#00529b" stroke-width="0.5" transform="rotate(' + heading + ' 14 14)"></polygon>'
-            : '';
+          var arrowCount = 0;
+          if (typeof vessel.speedKn === 'number') {
+            if (vessel.speedKn > 20) arrowCount = 3;
+            else if (vessel.speedKn > 10) arrowCount = 2;
+            else if (vessel.speedKn > UNDERWAY_SPEED_KN) arrowCount = 1;
+          }
+
+          // Chevrons stack outward from the hull, each one further from
+          // centre than the last, all rotating together as one group to
+          // match heading. More chevrons = faster, roughly - not a precise
+          // speed readout, just an at-a-glance indicator.
+          var chevrons = '';
+          for (var i = 0; i < arrowCount; i++) {
+            var d = 6 + i * 6; // distance from centre to this chevron's tip
+            var tipY = 24 - d, midY = tipY + 7, baseY = tipY + 10;
+            chevrons += '<polygon points="16,' + tipY + ' 20,' + baseY + ' 16,' + midY + ' 12,' + baseY +
+              '" fill="#d97706" stroke="#00529b" stroke-width="0.5"></polygon>';
+          }
+          var arrowGroup = arrowCount > 0 ? '<g transform="rotate(' + heading + ' 16 24)">' + chevrons + '</g>' : '';
 
           var html =
-            '<svg width="28" height="28" viewBox="0 0 28 28" class="' + (inactive ? 'vessel-icon-inactive' : '') + '">' +
-            arrowSvg +
-            '<circle cx="14" cy="14" r="7" fill="#00529b" stroke="#fff" stroke-width="1.5"></circle>' +
+            '<svg width="32" height="34" viewBox="0 0 32 34" class="' + (inactive ? 'vessel-icon-inactive' : '') + '">' +
+            arrowGroup +
+            '<circle cx="16" cy="24" r="7" fill="#00529b" stroke="#fff" stroke-width="1.5"></circle>' +
             '</svg>';
 
           return L.divIcon({
             className: 'vessel-marker-icon',
             html: html,
-            iconSize: [28, 28],
-            iconAnchor: [14, 14]
+            iconSize: [32, 34],
+            iconAnchor: [16, 24]
           });
         }
 
