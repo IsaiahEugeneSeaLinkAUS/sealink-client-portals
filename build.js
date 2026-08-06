@@ -345,7 +345,7 @@ function generateVesselMapHtml(relevantVesselNames) {
         var liveProxyUrl = ${JSON.stringify(LIVE_POSITION_PROXY_URL)};
         var REFRESH_COOLDOWN_MS = 90000; // matches a realistic build+deploy time - also caps how often this can fire
 
-        var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.800, 151.250], 12);
+        var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.793, 151.250], 12);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
           attribution: '&copy; OpenStreetMap contributors',
@@ -364,41 +364,67 @@ function generateVesselMapHtml(relevantVesselNames) {
         // centre, since a rotating boat silhouette needs a correctly
         // "forward-facing" source asset to look right, and this is simpler
         // and unambiguous either way.
+        // Chevron geometry constants - shared with the label-offset
+        // calculation below so the tooltip always clears whatever stack of
+        // chevrons is currently showing, no matter how many.
+        var HULL_R = 7;
+        var CHEVRON_GAP_FROM_HULL = 6; // clear gap between hull edge and first chevron
+        var CHEVRON_HEIGHT = 12;
+        var CHEVRON_GAP_BETWEEN = 6; // clear gap between consecutive chevrons
+        var CHEVRON_HALF_WIDTH = 6;
+        var CHEVRON_NOTCH = 8;
+        var CANVAS_SIZE = 74;
+        var HULL_CY = 63; // pushed low in a tall canvas, leaving room above for up to 3 chevrons
+
+        function arrowCountForSpeed(speedKn) {
+          if (typeof speedKn !== 'number') return 0;
+          if (speedKn > 20) return 3;
+          if (speedKn > 10) return 2;
+          if (speedKn > UNDERWAY_SPEED_KN) return 1;
+          return 0;
+        }
+
+        // How far above the hull's centre (in icon pixels) the topmost
+        // chevron reaches, plus a little breathing room - used to push the
+        // vessel's label tooltip clear of the chevron stack.
+        function labelClearance(arrowCount) {
+          if (arrowCount === 0) return HULL_R + 6;
+          var stackHeight = CHEVRON_GAP_FROM_HULL + arrowCount * CHEVRON_HEIGHT + (arrowCount - 1) * CHEVRON_GAP_BETWEEN;
+          return HULL_R + stackHeight + 6;
+        }
+
         function buildVesselIcon(vessel, inactive) {
-          var underway = typeof vessel.speedKn === 'number' && vessel.speedKn > UNDERWAY_SPEED_KN;
           var heading = typeof vessel.headingDeg === 'number' ? vessel.headingDeg : 0;
+          var arrowCount = arrowCountForSpeed(vessel.speedKn);
 
-          var arrowCount = 0;
-          if (typeof vessel.speedKn === 'number') {
-            if (vessel.speedKn > 20) arrowCount = 3;
-            else if (vessel.speedKn > 10) arrowCount = 2;
-            else if (vessel.speedKn > UNDERWAY_SPEED_KN) arrowCount = 1;
-          }
-
-          // Chevrons stack outward from the hull, each one further from
-          // centre than the last, all rotating together as one group to
-          // match heading. More chevrons = faster, roughly - not a precise
-          // speed readout, just an at-a-glance indicator.
+          // Chevrons stack outward from the hull, each one clearly
+          // separated from the hull and from each other, all rotating
+          // together as one group to match heading. More chevrons =
+          // faster, roughly - not a precise speed readout, just an
+          // at-a-glance indicator.
           var chevrons = '';
+          var hullTopEdge = HULL_CY - HULL_R;
           for (var i = 0; i < arrowCount; i++) {
-            var d = 6 + i * 6; // distance from centre to this chevron's tip
-            var tipY = 24 - d, midY = tipY + 7, baseY = tipY + 10;
-            chevrons += '<polygon points="16,' + tipY + ' 20,' + baseY + ' 16,' + midY + ' 12,' + baseY +
-              '" fill="#d97706" stroke="#00529b" stroke-width="0.5"></polygon>';
+            var baseY = hullTopEdge - CHEVRON_GAP_FROM_HULL - i * (CHEVRON_HEIGHT + CHEVRON_GAP_BETWEEN);
+            var tipY = baseY - CHEVRON_HEIGHT;
+            var midY = tipY + CHEVRON_NOTCH;
+            chevrons += '<polygon points="16,' + tipY + ' ' + (16 + CHEVRON_HALF_WIDTH) + ',' + baseY +
+              ' 16,' + midY + ' ' + (16 - CHEVRON_HALF_WIDTH) + ',' + baseY +
+              '" fill="#d97706" stroke="#00529b" stroke-width="0.75"></polygon>';
           }
-          var arrowGroup = arrowCount > 0 ? '<g transform="rotate(' + heading + ' 16 24)">' + chevrons + '</g>' : '';
+          var arrowGroup = arrowCount > 0 ? '<g transform="rotate(' + heading + ' 16 ' + HULL_CY + ')">' + chevrons + '</g>' : '';
 
           var html =
-            '<svg width="32" height="34" viewBox="0 0 32 34" class="' + (inactive ? 'vessel-icon-inactive' : '') + '">' +
+            '<svg width="32" height="' + CANVAS_SIZE + '" viewBox="0 0 32 ' + CANVAS_SIZE + '" class="' + (inactive ? 'vessel-icon-inactive' : '') + '">' +
             arrowGroup +
-            '<circle cx="16" cy="24" r="7" fill="#00529b" stroke="#fff" stroke-width="1.5"></circle>' +
+            '<circle cx="16" cy="' + HULL_CY + '" r="' + HULL_R + '" fill="#00529b" stroke="#fff" stroke-width="1.5"></circle>' +
             '</svg>';
 
           return L.divIcon({
             className: 'vessel-marker-icon',
             html: html,
-            iconSize: [32, 34],
-            iconAnchor: [16, 24]
+            iconSize: [32, CANVAS_SIZE],
+            iconAnchor: [16, HULL_CY]
           });
         }
 
@@ -564,7 +590,13 @@ function generateVesselMapHtml(relevantVesselNames) {
         // to normal placement.
         var LABEL_COLLISION_PX = 40;
         var LABEL_DIRECTIONS = ['top', 'bottom', 'right', 'left'];
-        var LABEL_OFFSETS = { top: [0, -8], bottom: [0, 8], right: [14, 0], left: [-14, 0] };
+
+        function labelOffsetFor(dir, topClearance) {
+          if (dir === 'top') return [0, -topClearance];
+          if (dir === 'bottom') return [0, 8];
+          if (dir === 'right') return [14, 0];
+          return [-14, 0];
+        }
 
         function resolveLabelPlacements(entries) {
           var points = entries.map(function (e) {
@@ -590,12 +622,13 @@ function generateVesselMapHtml(relevantVesselNames) {
 
           points.forEach(function (p) {
             var dir = directionByName[p.entry.name] || 'top';
+            var className = 'vessel-label' + (p.entry.inactive ? ' vessel-label-inactive' : '');
             if (p.entry.marker.getTooltip()) p.entry.marker.unbindTooltip();
             p.entry.marker.bindTooltip(p.entry.labelHtml, {
               permanent: true,
               direction: dir,
-              offset: LABEL_OFFSETS[dir],
-              className: 'vessel-label'
+              offset: labelOffsetFor(dir, p.entry.topClearance),
+              className: className
             });
           });
         }
@@ -606,7 +639,7 @@ function generateVesselMapHtml(relevantVesselNames) {
         // in one place.
         function applyPositions(vessels, labelText) {
           var vesselByName = {};
-          var visibleEntries = []; // {name, marker, labelHtml} - tooltip placement resolved after all markers are positioned
+          var visibleEntries = []; // {name, marker, labelHtml, inactive, topClearance} - tooltip placement resolved after all markers are positioned
 
           vessels
             .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
@@ -629,7 +662,8 @@ function generateVesselMapHtml(relevantVesselNames) {
 
               var stopName = nearestStopName(v);
               var labelHtml = shortNameFor(v.name) + (stopName ? ' ' + stopName : '');
-              var icon = buildVesselIcon(v, isInactiveAtMarina(v));
+              var inactive = isInactiveAtMarina(v);
+              var icon = buildVesselIcon(v, inactive);
 
               if (markers[v.name]) {
                 markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml).setIcon(icon);
@@ -637,7 +671,13 @@ function generateVesselMapHtml(relevantVesselNames) {
                 markers[v.name] = L.marker([v.lat, v.lon], { icon: icon }).addTo(map).bindPopup(popupHtml);
               }
 
-              visibleEntries.push({ name: v.name, marker: markers[v.name], labelHtml: labelHtml });
+              visibleEntries.push({
+                name: v.name,
+                marker: markers[v.name],
+                labelHtml: labelHtml,
+                inactive: inactive,
+                topClearance: labelClearance(arrowCountForSpeed(v.speedKn))
+              });
             });
 
           resolveLabelPlacements(visibleEntries);
@@ -897,6 +937,8 @@ function generateGroupedHtmlTable(clientName, trips) {
         .vessel-marker-icon svg.vessel-icon-inactive { filter: grayscale(1) opacity(0.75); }
         .leaflet-tooltip.vessel-label { background: #00529b; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold; letter-spacing: 0.3px; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
         .leaflet-tooltip.vessel-label::before { border-top-color: #00529b; }
+        .leaflet-tooltip.vessel-label-inactive { background: #8a8f98; }
+        .leaflet-tooltip.vessel-label-inactive::before { border-top-color: #8a8f98; }
 
         /* Filter Control Bar */
         .filter-panel { background: #f0f4f8; border: 1px solid #d0dbe5; border-radius: 6px; padding: 16px; margin-bottom: 24px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
