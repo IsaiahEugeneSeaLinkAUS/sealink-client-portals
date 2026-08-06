@@ -2,6 +2,29 @@ const fs = require('fs');
 const path = require('path');
 const { parse } = require('csv-parse/sync');
 
+// fetch() has no default timeout - a hung external API (Helm or OnWatch)
+// would previously hang the whole build indefinitely, which under
+// cancel-in-progress:false queues every subsequent trigger behind it,
+// eventually causing GitHub Pages itself to start cancelling the backlog
+// ("higher priority waiting request" errors). This makes a hang fail fast
+// and loudly instead, so it never gets the chance to jam the queue.
+const FETCH_TIMEOUT_MS = 20000;
+
+async function fetchWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`Request to ${url} timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 1. ENVIRONMENT VARIABLES & SANITIZATION
 // ---------------------------------------------------------------------------
@@ -100,7 +123,7 @@ async function fetchOnWatchPositions() {
   }
 
   const url = `https://api.onwatchvms.com/v1/fleets/${ONWATCH_FLEET_ID}/position?time_zone=Australia/Brisbane`;
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     headers: { Authorization: `Bearer ${ONWATCH_API_KEY}` }
   });
 
@@ -148,7 +171,7 @@ async function generateSites() {
     return [];
   });
 
-  const response = await fetch(CSV_URL, { headers });
+  const response = await fetchWithTimeout(CSV_URL, { headers });
   console.log(`HTTP Fetch Status: ${response.status} ${response.statusText}`);
 
   if (!response.ok) {
@@ -353,77 +376,31 @@ function generateVesselMapHtml(relevantVesselNames) {
         }).addTo(map);
 
         // Underway threshold for the heading arrow - below this, no arrow
-        // shows at all (reads as stopped/arrived); above it, a small arrow
-        // rotates to match the vessel's current heading in degrees.
-        var UNDERWAY_SPEED_KN = 3;
-
-        // Builds a fresh icon each time rather than toggling a shared one,
-        // since heading/underway/inactive can all change between refreshes.
-        // Hull is a plain navy circle (doesn't itself rotate); the heading
-        // arrow is a separate small triangle rotated around the hull's
-        // centre, since a rotating boat silhouette needs a correctly
-        // "forward-facing" source asset to look right, and this is simpler
-        // and unambiguous either way.
-        // Chevron geometry constants - shared with the label-offset
-        // calculation below so the tooltip always clears whatever stack of
-        // chevrons is currently showing, no matter how many.
+        // shows at all (reads as stopped/arrived); above it, a single
+        // small arrow rotates to match the vessel's current heading.
+        var UNDERWAY_SPEED_KN = 5;
         var HULL_R = 7;
-        var CHEVRON_GAP_FROM_HULL = 6; // clear gap between hull edge and first chevron
-        var CHEVRON_HEIGHT = 12;
-        var CHEVRON_GAP_BETWEEN = 6; // clear gap between consecutive chevrons
-        var CHEVRON_HALF_WIDTH = 6;
-        var CHEVRON_NOTCH = 8;
-        var CANVAS_SIZE = 74;
-        var HULL_CY = 63; // pushed low in a tall canvas, leaving room above for up to 3 chevrons
-
-        function arrowCountForSpeed(speedKn) {
-          if (typeof speedKn !== 'number') return 0;
-          if (speedKn > 20) return 3;
-          if (speedKn > 10) return 2;
-          if (speedKn > UNDERWAY_SPEED_KN) return 1;
-          return 0;
-        }
-
-        // How far above the hull's centre (in icon pixels) the topmost
-        // chevron reaches, plus a little breathing room - used to push the
-        // vessel's label tooltip clear of the chevron stack.
-        function labelClearance(arrowCount) {
-          if (arrowCount === 0) return HULL_R + 6;
-          var stackHeight = CHEVRON_GAP_FROM_HULL + arrowCount * CHEVRON_HEIGHT + (arrowCount - 1) * CHEVRON_GAP_BETWEEN;
-          return HULL_R + stackHeight + 6;
-        }
+        var HULL_CY = 16;
+        var CANVAS_SIZE = 28;
 
         function buildVesselIcon(vessel, inactive) {
           var heading = typeof vessel.headingDeg === 'number' ? vessel.headingDeg : 0;
-          var arrowCount = arrowCountForSpeed(vessel.speedKn);
+          var underway = typeof vessel.speedKn === 'number' && vessel.speedKn > UNDERWAY_SPEED_KN;
 
-          // Chevrons stack outward from the hull, each one clearly
-          // separated from the hull and from each other, all rotating
-          // together as one group to match heading. More chevrons =
-          // faster, roughly - not a precise speed readout, just an
-          // at-a-glance indicator.
-          var chevrons = '';
-          var hullTopEdge = HULL_CY - HULL_R;
-          for (var i = 0; i < arrowCount; i++) {
-            var baseY = hullTopEdge - CHEVRON_GAP_FROM_HULL - i * (CHEVRON_HEIGHT + CHEVRON_GAP_BETWEEN);
-            var tipY = baseY - CHEVRON_HEIGHT;
-            var midY = tipY + CHEVRON_NOTCH;
-            chevrons += '<polygon points="16,' + tipY + ' ' + (16 + CHEVRON_HALF_WIDTH) + ',' + baseY +
-              ' 16,' + midY + ' ' + (16 - CHEVRON_HALF_WIDTH) + ',' + baseY +
-              '" fill="#d97706" stroke="#00529b" stroke-width="0.75"></polygon>';
-          }
-          var arrowGroup = arrowCount > 0 ? '<g transform="rotate(' + heading + ' 16 ' + HULL_CY + ')">' + chevrons + '</g>' : '';
+          var arrowSvg = underway
+            ? '<polygon points="16,1 20,11 16,8 12,11" fill="#d97706" stroke="#00529b" stroke-width="0.5" transform="rotate(' + heading + ' 16 ' + HULL_CY + ')"></polygon>'
+            : '';
 
           var html =
-            '<svg width="32" height="' + CANVAS_SIZE + '" viewBox="0 0 32 ' + CANVAS_SIZE + '" class="' + (inactive ? 'vessel-icon-inactive' : '') + '">' +
-            arrowGroup +
+            '<svg width="' + CANVAS_SIZE + '" height="' + CANVAS_SIZE + '" viewBox="0 0 ' + CANVAS_SIZE + ' ' + CANVAS_SIZE + '" class="' + (inactive ? 'vessel-icon-inactive' : '') + '">' +
+            arrowSvg +
             '<circle cx="16" cy="' + HULL_CY + '" r="' + HULL_R + '" fill="#00529b" stroke="#fff" stroke-width="1.5"></circle>' +
             '</svg>';
 
           return L.divIcon({
             className: 'vessel-marker-icon',
             html: html,
-            iconSize: [32, CANVAS_SIZE],
+            iconSize: [CANVAS_SIZE, CANVAS_SIZE],
             iconAnchor: [16, HULL_CY]
           });
         }
@@ -533,6 +510,15 @@ function generateVesselMapHtml(relevantVesselNames) {
           var arrTs = parseInt(row.getAttribute('data-arr-ts'), 10);
           if (!depTs || now < depTs) return null;
 
+          // Once the vessel's next scheduled run has begun, this row is
+          // done - stop evaluating it live. Without this cap, a vessel
+          // that returns to this row's origin stop later (as the
+          // destination of a subsequent leg) looks identical to "never
+          // left in the first place", which would wrongly revive a
+          // Delayed badge on a run that already completed on time.
+          var nextDepTs = parseInt(row.getAttribute('data-next-dep-ts'), 10);
+          if (nextDepTs && now >= nextDepTs) return null;
+
           var origin = STOP_BY_ALIAS[row.getAttribute('data-from')];
           var dest = STOP_BY_ALIAS[row.getAttribute('data-to')];
           if (!origin) return null; // can't assess delay without knowing where it started from
@@ -599,13 +585,7 @@ function generateVesselMapHtml(relevantVesselNames) {
         // to normal placement.
         var LABEL_COLLISION_PX = 40;
         var LABEL_DIRECTIONS = ['top', 'bottom', 'right', 'left'];
-
-        function labelOffsetFor(dir, topClearance) {
-          if (dir === 'top') return [0, -topClearance];
-          if (dir === 'bottom') return [0, 8];
-          if (dir === 'right') return [14, 0];
-          return [-14, 0];
-        }
+        var LABEL_OFFSETS = { top: [0, -8], bottom: [0, 8], right: [14, 0], left: [-14, 0] };
 
         function resolveLabelPlacements(entries) {
           var points = entries.map(function (e) {
@@ -636,7 +616,7 @@ function generateVesselMapHtml(relevantVesselNames) {
             p.entry.marker.bindTooltip(p.entry.labelHtml, {
               permanent: true,
               direction: dir,
-              offset: labelOffsetFor(dir, p.entry.topClearance),
+              offset: LABEL_OFFSETS[dir],
               className: className
             });
           });
@@ -684,8 +664,7 @@ function generateVesselMapHtml(relevantVesselNames) {
                 name: v.name,
                 marker: markers[v.name],
                 labelHtml: labelHtml,
-                inactive: inactive,
-                topClearance: labelClearance(arrowCountForSpeed(v.speedKn))
+                inactive: inactive
               });
             });
 
@@ -862,7 +841,7 @@ function generateGroupedHtmlTable(clientName, trips) {
               <tbody>
         `;
 
-        dayVesselTrips.forEach(({ row, parsedStart, parsedEnd, isoDate }) => {
+        dayVesselTrips.forEach(({ row, parsedStart, parsedEnd, isoDate }, tripIndex) => {
           const runTypeRaw = row['Trip Type Name'] || 'Scheduled Run';
           const runTypeHtml = formatRunTypeHtml(runTypeRaw);
           const depLoc = row['Location From Name'] || row['Origin'] || '-';
@@ -870,6 +849,16 @@ function generateGroupedHtmlTable(clientName, trips) {
           const depTime = parsedStart.timeStr;
           const arrTime = parsedEnd.timeStr;
           const status = formatStatus(row['Status']);
+
+          // The vessel's next scheduled departure after this run, if any -
+          // used client-side to stop treating this row as "live" once the
+          // vessel has clearly moved on. Without this, a vessel returning
+          // to this row's origin stop later (as the destination of a
+          // later leg) can look identical to "never left in the first
+          // place", wrongly reviving a Delayed badge on an already-
+          // completed run.
+          const nextTrip = dayVesselTrips[tripIndex + 1];
+          const nextDepTs = nextTrip ? nextTrip.parsedStart.timestamp : '';
 
           const routeText = (depLoc && arrLoc)
             ? `${depLoc} &rarr; ${arrLoc}`
@@ -889,6 +878,7 @@ function generateGroupedHtmlTable(clientName, trips) {
                 data-date="${isoDate}"
                 data-dep-ts="${parsedStart.timestamp}"
                 data-arr-ts="${parsedEnd.timestamp}"
+                data-next-dep-ts="${nextDepTs}"
                 data-from="${depLoc.trim().toLowerCase()}"
                 data-to="${arrLoc.trim().toLowerCase()}">
               <td>${runTypeHtml}</td>
