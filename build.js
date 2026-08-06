@@ -441,11 +441,16 @@ function generateVesselMapHtml(relevantVesselNames) {
 
         // Vessels sitting at the Marina are shown greyed-out (inactive),
         // except Trojan, which actually operates trips out of the Marina.
-        function isInactiveAtMarina(vessel) {
+        // Greys out whenever the vessel is sitting at any known stop -
+        // the same condition that puts a stop name next to its label on
+        // the map. Trojan is the one exception, since it actually
+        // operates trips out of the Marina rather than sitting idle there.
+        function isInactiveAtStop(vessel) {
           var key = (vessel.name || '').trim().toLowerCase();
-          if (key === 'trojan') return false;
-          var marina = STOP_BY_ALIAS['marina'];
-          return marina && isNearStop(vessel, marina);
+          var stopName = nearestStopName(vessel);
+          if (!stopName) return false;
+          if (key === 'trojan' && stopName === 'Marina') return false;
+          return true;
         }
 
         // Short codes for the map label - falls back to the full name (as
@@ -482,6 +487,7 @@ function generateVesselMapHtml(relevantVesselNames) {
         var AT_STOP_SPEED_KN = 1.0;
         var DELAY_GRACE_MIN = 2;
         var ARRIVED_WINDOW_MIN = 10;
+        var ARRIVED_LOOSE_RADIUS_M = 500; // generous tolerance for docking GPS imprecision, without accepting "still transiting nearby" as arrived
         var DELAY_STALE_HOURS = 3; // ignore a row's departure time if it's this far in the past - avoids flagging long-finished runs
 
         // Haversine distance in meters between two lat/lon points.
@@ -541,19 +547,22 @@ function generateVesselMapHtml(relevantVesselNames) {
             return null;
           }
 
-          // Left the origin. "Arrived" is anchored to the SCHEDULED arrival
-          // time, not to precisely detecting the vessel inside the
-          // destination geofence - real-world docking position/GPS lag
-          // doesn't always land inside that radius exactly on the minute,
-          // and requiring it meant a slightly-off detection could skip
-          // "Arrived" entirely and jump straight back to Confirmed. Being
-          // physically at the destination still counts (covers early
-          // arrivals, before the scheduled time), but reaching the
-          // scheduled time is enough on its own too.
+          // Left the origin. "Arrived" combines two signals rather than
+          // relying on either alone:
+          //  - being detected right at the destination (handles early
+          //    arrivals, before the scheduled time)
+          //  - the scheduled time passing AND being at least roughly
+          //    close by (handles imprecise docking GPS - a vessel can sit
+          //    just outside the strict 100/150m "at stop" radius without
+          //    having actually failed to arrive)
+          // What this rules out: a vessel genuinely still transiting miles
+          // away when its scheduled time ticks over - that should read as
+          // still Departed (running late), not falsely Arrived.
           var atDest = dest && isNearStop(vessel, dest);
+          var roughlyNearDest = dest && distanceMeters(vessel.lat, vessel.lon, dest.lat, dest.lon) <= ARRIVED_LOOSE_RADIUS_M;
           var arrivedWindowOpen = arrTs && now <= arrTs + ARRIVED_WINDOW_MIN * 60000;
 
-          if (arrivedWindowOpen && (atDest || now >= arrTs)) {
+          if (arrivedWindowOpen && (atDest || (now >= arrTs && roughlyNearDest))) {
             return { text: 'Arrived', className: 'badge-arrived' };
           }
 
@@ -662,7 +671,7 @@ function generateVesselMapHtml(relevantVesselNames) {
 
               var stopName = nearestStopName(v);
               var labelHtml = shortNameFor(v.name) + (stopName ? ' ' + stopName : '');
-              var inactive = isInactiveAtMarina(v);
+              var inactive = isInactiveAtStop(v);
               var icon = buildVesselIcon(v, inactive);
 
               if (markers[v.name]) {
