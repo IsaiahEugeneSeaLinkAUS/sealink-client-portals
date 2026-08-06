@@ -345,7 +345,7 @@ function generateVesselMapHtml(relevantVesselNames) {
         var liveProxyUrl = ${JSON.stringify(LIVE_POSITION_PROXY_URL)};
         var REFRESH_COOLDOWN_MS = 90000; // matches a realistic build+deploy time - also caps how often this can fire
 
-        var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.805, 151.265], 12);
+        var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.800, 151.250], 12);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
           attribution: '&copy; OpenStreetMap contributors',
