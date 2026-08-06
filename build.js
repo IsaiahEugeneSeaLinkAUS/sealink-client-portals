@@ -650,7 +650,7 @@ function generateVesselMapHtml(relevantVesselNames) {
         // the rebuild cycle. Parses OnWatch's raw response shape client-side
         // since the proxy just passes it straight through.
         function fetchLivePositions() {
-          fetch(liveProxyUrl)
+          fetch(liveProxyUrl, { method: 'POST' })
             .then(function (res) { return res.json(); })
             .then(function (data) {
               var raw = data.data || data.vessels || [];
