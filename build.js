@@ -322,7 +322,7 @@ const POWER_AUTOMATE_REFRESH_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed284
 // When this is set, position polling bypasses the rebuild cycle entirely -
 // genuinely live, bounded only by OnWatch's own ~2 min GPS reporting lag.
 // Left blank, the map just falls back to whatever positions.json says.
-const LIVE_POSITION_PROXY_URL = ''; // TODO: paste your live-proxy flow's HTTP POST URL here
+const LIVE_POSITION_PROXY_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/23/workflows/5dcebc97cfd740069d8cf07fc5320a90/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=2vF8GXOU11kmSuoCa6bIDrNeRMw94X8A-GW0cXaPdJk';
 
 function generateVesselMapHtml(relevantVesselNames) {
   if (relevantVesselNames.length === 0) return '';
@@ -352,17 +352,39 @@ function generateVesselMapHtml(relevantVesselNames) {
           maxZoom: 17
         }).addTo(map);
 
-        var shipIcon = L.divIcon({
-          className: 'vessel-marker-icon',
-          html: '⛴️',
-          iconSize: [26, 26]
-        });
+        // Underway threshold for the heading arrow - below this, no arrow
+        // shows at all (reads as stopped/arrived); above it, a small arrow
+        // rotates to match the vessel's current heading in degrees.
+        var UNDERWAY_SPEED_KN = 3;
 
-        var shipIconInactive = L.divIcon({
-          className: 'vessel-marker-icon vessel-marker-inactive',
-          html: '⛴️',
-          iconSize: [26, 26]
-        });
+        // Builds a fresh icon each time rather than toggling a shared one,
+        // since heading/underway/inactive can all change between refreshes.
+        // Hull is a plain navy circle (doesn't itself rotate); the heading
+        // arrow is a separate small triangle rotated around the hull's
+        // centre, since a rotating boat silhouette needs a correctly
+        // "forward-facing" source asset to look right, and this is simpler
+        // and unambiguous either way.
+        function buildVesselIcon(vessel, inactive) {
+          var underway = typeof vessel.speedKn === 'number' && vessel.speedKn > UNDERWAY_SPEED_KN;
+          var heading = typeof vessel.headingDeg === 'number' ? vessel.headingDeg : 0;
+
+          var arrowSvg = underway
+            ? '<polygon points="14,1 18,11 14,8 10,11" fill="#d97706" stroke="#00529b" stroke-width="0.5" transform="rotate(' + heading + ' 14 14)"></polygon>'
+            : '';
+
+          var html =
+            '<svg width="28" height="28" viewBox="0 0 28 28" class="' + (inactive ? 'vessel-icon-inactive' : '') + '">' +
+            arrowSvg +
+            '<circle cx="14" cy="14" r="7" fill="#00529b" stroke="#fff" stroke-width="1.5"></circle>' +
+            '</svg>';
+
+          return L.divIcon({
+            className: 'vessel-marker-icon',
+            html: html,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+          });
+        }
 
         // Vessels within this radius of the Maintenance Slipway are hidden
         // from the map entirely - not client-relevant, and this location
@@ -515,11 +537,60 @@ function generateVesselMapHtml(relevantVesselNames) {
           });
         }
 
+        // When two or more vessels are close enough on screen that their
+        // permanent labels would overlap, stagger them onto different
+        // sides instead of letting them stack illegibly. Distance is
+        // measured in screen pixels (not lat/lon), since that's what
+        // actually determines whether labels visually collide - the same
+        // lat/lon gap looks totally different at different zoom levels.
+        // Re-resolved from scratch every refresh rather than remembered,
+        // so a cluster that splits up on a later check goes straight back
+        // to normal placement.
+        var LABEL_COLLISION_PX = 40;
+        var LABEL_DIRECTIONS = ['top', 'bottom', 'right', 'left'];
+        var LABEL_OFFSETS = { top: [0, -8], bottom: [0, 8], right: [14, 0], left: [-14, 0] };
+
+        function resolveLabelPlacements(entries) {
+          var points = entries.map(function (e) {
+            return { entry: e, pt: map.latLngToContainerPoint(e.marker.getLatLng()) };
+          });
+
+          var directionByName = {};
+
+          points.forEach(function (p, i) {
+            if (directionByName[p.entry.name]) return;
+
+            var cluster = [p];
+            points.forEach(function (q, j) {
+              if (i === j) return;
+              var dx = p.pt.x - q.pt.x, dy = p.pt.y - q.pt.y;
+              if (Math.sqrt(dx * dx + dy * dy) < LABEL_COLLISION_PX) cluster.push(q);
+            });
+
+            cluster.forEach(function (c, idx) {
+              directionByName[c.entry.name] = LABEL_DIRECTIONS[idx % LABEL_DIRECTIONS.length];
+            });
+          });
+
+          points.forEach(function (p) {
+            var dir = directionByName[p.entry.name] || 'top';
+            if (p.entry.marker.getTooltip()) p.entry.marker.unbindTooltip();
+            p.entry.marker.bindTooltip(p.entry.labelHtml, {
+              permanent: true,
+              direction: dir,
+              offset: LABEL_OFFSETS[dir],
+              className: 'vessel-label'
+            });
+          });
+        }
+
         // Shared renderer - both the live proxy and the static snapshot
         // feed into this once normalized to the same {name, lat, lon,
-        // speedKn} shape, so marker-drawing logic only lives in one place.
+        // speedKn, headingDeg} shape, so marker-drawing logic only lives
+        // in one place.
         function applyPositions(vessels, labelText) {
           var vesselByName = {};
+          var visibleEntries = []; // {name, marker, labelHtml} - tooltip placement resolved after all markers are positioned
 
           vessels
             .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
@@ -542,23 +613,18 @@ function generateVesselMapHtml(relevantVesselNames) {
 
               var stopName = nearestStopName(v);
               var labelHtml = shortNameFor(v.name) + (stopName ? ' ' + stopName : '');
-              var iconToUse = isInactiveAtMarina(v) ? shipIconInactive : shipIcon;
+              var icon = buildVesselIcon(v, isInactiveAtMarina(v));
 
               if (markers[v.name]) {
-                markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml).setTooltipContent(labelHtml).setIcon(iconToUse);
+                markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml).setIcon(icon);
               } else {
-                markers[v.name] = L.marker([v.lat, v.lon], { icon: iconToUse })
-                  .addTo(map)
-                  .bindPopup(popupHtml)
-                  .bindTooltip(labelHtml, {
-                    permanent: true,
-                    direction: 'top',
-                    offset: [0, -8],
-                    className: 'vessel-label'
-                  });
+                markers[v.name] = L.marker([v.lat, v.lon], { icon: icon }).addTo(map).bindPopup(popupHtml);
               }
+
+              visibleEntries.push({ name: v.name, marker: markers[v.name], labelHtml: labelHtml });
             });
 
+          resolveLabelPlacements(visibleEntries);
           updateRowStatuses(vesselByName);
 
           var updatedEl = document.getElementById('map-updated');
@@ -593,7 +659,8 @@ function generateVesselMapHtml(relevantVesselNames) {
                   name: v.vessel_name || v.vessel_id || 'Unknown',
                   lat: v.latitude,
                   lon: v.longitude,
-                  speedKn: v.speed_over_ground && v.speed_over_ground.value
+                  speedKn: v.speed_over_ground && v.speed_over_ground.value,
+                  headingDeg: v.heading && v.heading.value
                 };
               }).filter(function (v) { return typeof v.lat === 'number' && typeof v.lon === 'number'; });
 
@@ -810,8 +877,8 @@ function generateGroupedHtmlTable(clientName, trips) {
         .btn-refresh-map:disabled { opacity: 0.6; cursor: default; }
         .map-updated-label { font-size: 12px; font-weight: normal; opacity: 0.85; }
         #vessel-map { height: 320px; width: 100%; }
-        .vessel-marker-icon { font-size: 22px; text-align: center; line-height: 26px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
-        .vessel-marker-inactive { filter: grayscale(1) opacity(0.75) drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+        .vessel-marker-icon { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+        .vessel-marker-icon svg.vessel-icon-inactive { filter: grayscale(1) opacity(0.75); }
         .leaflet-tooltip.vessel-label { background: #00529b; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold; letter-spacing: 0.3px; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
         .leaflet-tooltip.vessel-label::before { border-top-color: #00529b; }
 
