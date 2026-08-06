@@ -358,6 +358,32 @@ function generateVesselMapHtml(relevantVesselNames) {
           iconSize: [26, 26]
         });
 
+        var shipIconInactive = L.divIcon({
+          className: 'vessel-marker-icon vessel-marker-inactive',
+          html: '⛴️',
+          iconSize: [26, 26]
+        });
+
+        // Vessels within this radius of the Maintenance Slipway are hidden
+        // from the map entirely - not client-relevant, and this location
+        // deliberately isn't in STOPS so it never shows as a labelled stop
+        // or feeds into the departed/delayed/arrived logic.
+        var MAINTENANCE_SLIPWAY = { lat: -23.83619, lon: 151.24365 };
+        var HIDE_RADIUS_M = 200;
+
+        function isInMaintenanceZone(vessel) {
+          return distanceMeters(vessel.lat, vessel.lon, MAINTENANCE_SLIPWAY.lat, MAINTENANCE_SLIPWAY.lon) <= HIDE_RADIUS_M;
+        }
+
+        // Vessels sitting at the Marina are shown greyed-out (inactive),
+        // except Trojan, which actually operates trips out of the Marina.
+        function isInactiveAtMarina(vessel) {
+          var key = (vessel.name || '').trim().toLowerCase();
+          if (key === 'trojan') return false;
+          var marina = STOP_BY_ALIAS['marina'];
+          return marina && isNearStop(vessel, marina);
+        }
+
         // Short codes for the map label - falls back to the full name (as
         // given) for any vessel not in this list, so a new or unmapped
         // vessel still shows something rather than nothing.
@@ -498,18 +524,30 @@ function generateVesselMapHtml(relevantVesselNames) {
           vessels
             .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
             .forEach(function (v) {
+              // Populated regardless of map visibility - the schedule
+              // badges (Departed/Delayed/Arrived) should still reflect
+              // reality even for a vessel currently hidden from the map.
               vesselByName[(v.name || '').trim().toLowerCase()] = v;
+
+              if (isInMaintenanceZone(v)) {
+                if (markers[v.name]) {
+                  map.removeLayer(markers[v.name]);
+                  delete markers[v.name];
+                }
+                return;
+              }
 
               var popupHtml = '<strong>' + v.name + '</strong><br>' +
                 (typeof v.speedKn === 'number' ? v.speedKn.toFixed(1) + ' kn' : 'Speed unavailable');
 
               var stopName = nearestStopName(v);
               var labelHtml = shortNameFor(v.name) + (stopName ? ' ' + stopName : '');
+              var iconToUse = isInactiveAtMarina(v) ? shipIconInactive : shipIcon;
 
               if (markers[v.name]) {
-                markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml).setTooltipContent(labelHtml);
+                markers[v.name].setLatLng([v.lat, v.lon]).setPopupContent(popupHtml).setTooltipContent(labelHtml).setIcon(iconToUse);
               } else {
-                markers[v.name] = L.marker([v.lat, v.lon], { icon: shipIcon })
+                markers[v.name] = L.marker([v.lat, v.lon], { icon: iconToUse })
                   .addTo(map)
                   .bindPopup(popupHtml)
                   .bindTooltip(labelHtml, {
@@ -773,6 +811,7 @@ function generateGroupedHtmlTable(clientName, trips) {
         .map-updated-label { font-size: 12px; font-weight: normal; opacity: 0.85; }
         #vessel-map { height: 320px; width: 100%; }
         .vessel-marker-icon { font-size: 22px; text-align: center; line-height: 26px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+        .vessel-marker-inactive { filter: grayscale(1) opacity(0.75) drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
         .leaflet-tooltip.vessel-label { background: #00529b; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold; letter-spacing: 0.3px; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
         .leaflet-tooltip.vessel-label::before { border-top-color: #00529b; }
 
