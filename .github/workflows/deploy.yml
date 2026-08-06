@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # Merged into one job (was previously build + deploy as two separate
@@ -28,6 +28,7 @@ jobs:
   # needs. One job removes that whole layer of overhead.
   build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 4
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -38,7 +39,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm # needs package-lock.json committed alongside this workflow
 
       - name: Install dependencies
