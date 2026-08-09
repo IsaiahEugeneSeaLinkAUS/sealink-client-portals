@@ -76,7 +76,7 @@ const STOPS = [
 // Display text (schedule headers, filter dropdown) always uses Helm's
 // original spelling regardless - this only affects the matching key.
 const VESSEL_NAME_ALIASES = {
-  'r.b trojan': 'trojan'
+  'r.b. trojan': 'trojan'
 };
 
 function onWatchVesselKey(helmName) {
