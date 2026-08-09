@@ -205,7 +205,8 @@ async function generateSites() {
   console.log(`Parsed ${records.length} total rows from Helm.`);
 
   // ---------------------------------------------------------------------------
-  // 3. FILTER OUT CANCELLED, COMPLETED, DRAFT & PENDING TRIPS
+  // 3. FILTER OUT CANCELLED, COMPLETED, DRAFT & PENDING TRIPS, AND ANY
+  // TRIP WITH NO VESSEL ASSIGNED (stale/orphaned entries)
   // ---------------------------------------------------------------------------
   const filteredTrips = records.filter(row => {
     const status = String(
@@ -219,7 +220,9 @@ async function generateSites() {
     const isComplete = status.includes('COMPLETE');
     const isDraft = status.includes('DRAFT') || status.includes('PENDING') || status.includes('UNCONFIRM');
 
-    return !isCancelled && !isComplete && !isDraft;
+    const hasVessel = (row['Resource'] || row['Vessel'] || row['Resource Name'] || row['Asset'] || '').trim() !== '';
+
+    return !isCancelled && !isComplete && !isDraft && hasVessel;
   });
 
   // ---------------------------------------------------------------------------
