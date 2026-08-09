@@ -68,6 +68,22 @@ const STOPS = [
   { name: 'Marina', aliases: ['marina', 'sealink marina', 'gladstone marina'], lat: -23.82783, lon: 151.24350 }
 ];
 
+// Helm and OnWatch don't always spell a vessel's name identically (e.g.
+// Helm's "R.B Trojan" vs OnWatch's "Trojan") - live position/status
+// matching is a straight name comparison, so a mismatch here silently
+// drops that vessel from both the map and its schedule status badges.
+// Keyed on Helm's spelling (lowercase), value is OnWatch's spelling.
+// Display text (schedule headers, filter dropdown) always uses Helm's
+// original spelling regardless - this only affects the matching key.
+const VESSEL_NAME_ALIASES = {
+  'r.b trojan': 'trojan'
+};
+
+function onWatchVesselKey(helmName) {
+  const key = (helmName || '').trim().toLowerCase();
+  return VESSEL_NAME_ALIASES[key] || key;
+}
+
 // Helper to parse Helm CSV date strings as explicit Brisbane time (UTC+10)
 function parseHelmDate(dateStr) {
   if (!dateStr) {
@@ -237,6 +253,13 @@ async function generateSites() {
   });
 
   console.log(`Deduplicated and sorted down to ${validTrips.length} upcoming confirmed trips.`);
+
+  const tripCountByVessel = {};
+  validTrips.forEach(row => {
+    const v = (row['Resource'] || row['Vessel'] || row['Resource Name'] || row['Asset'] || 'Unassigned').trim();
+    tripCountByVessel[v] = (tripCountByVessel[v] || 0) + 1;
+  });
+  console.log('Trips by vessel:', JSON.stringify(tripCountByVessel));
 
   // ---------------------------------------------------------------------------
   // 4b. LIVE VESSEL POSITIONS (OnWatch VMS) - fetch was already kicked off
@@ -416,6 +439,19 @@ function generateVesselMapHtml(relevantVesselNames) {
           return distanceMeters(vessel.lat, vessel.lon, MAINTENANCE_SLIPWAY.lat, MAINTENANCE_SLIPWAY.lon) <= HIDE_RADIUS_M;
         }
 
+        // A vessel offline for a while (e.g. not operating over a weekend)
+        // still has a last-known position sitting in OnWatch, which would
+        // otherwise show as a marker frozen wherever it was last seen,
+        // looking exactly like a live position. Hide it once that
+        // position is old enough to no longer be meaningfully "current".
+        var STALE_POSITION_HOURS = 12;
+
+        function isStalePosition(vessel) {
+          if (!vessel.lastUpdated) return true;
+          var ageMs = Date.now() - new Date(vessel.lastUpdated).getTime();
+          return ageMs > STALE_POSITION_HOURS * 3600000;
+        }
+
         // Vessels sitting at the Marina are shown greyed-out (inactive),
         // except Trojan, which actually operates trips out of the Marina.
         // Greys out whenever the vessel is sitting at any known stop -
@@ -563,8 +599,8 @@ function generateVesselMapHtml(relevantVesselNames) {
         function updateRowStatuses(vesselByName) {
           var now = Date.now();
           document.querySelectorAll('.data-row').forEach(function (row) {
-            var vesselName = row.getAttribute('data-vessel');
-            var vessel = vesselByName[vesselName];
+            var onWatchKey = row.getAttribute('data-onwatch-vessel');
+            var vessel = vesselByName[onWatchKey];
             var badge = row.querySelector('.status-badge');
             if (!vessel || !badge) return;
 
@@ -638,7 +674,7 @@ function generateVesselMapHtml(relevantVesselNames) {
               // reality even for a vessel currently hidden from the map.
               vesselByName[(v.name || '').trim().toLowerCase()] = v;
 
-              if (isInMaintenanceZone(v)) {
+              if (isInMaintenanceZone(v) || isStalePosition(v)) {
                 if (markers[v.name]) {
                   map.removeLayer(markers[v.name]);
                   delete markers[v.name];
@@ -704,7 +740,8 @@ function generateVesselMapHtml(relevantVesselNames) {
                   lat: v.latitude,
                   lon: v.longitude,
                   speedKn: v.speed_over_ground && v.speed_over_ground.value,
-                  headingDeg: v.heading && v.heading.value
+                  headingDeg: v.heading && v.heading.value,
+                  lastUpdated: v.last_updated
                 };
               }).filter(function (v) { return typeof v.lat === 'number' && typeof v.lon === 'number'; });
 
@@ -874,6 +911,7 @@ function generateGroupedHtmlTable(clientName, trips) {
           contentHtml += `
             <tr class="${rowClass}"
                 data-vessel="${vesselName.toLowerCase()}"
+                data-onwatch-vessel="${onWatchVesselKey(vesselName)}"
                 data-runtype="${runTypeRaw.toLowerCase()}"
                 data-date="${isoDate}"
                 data-dep-ts="${parsedStart.timestamp}"
@@ -902,7 +940,7 @@ function generateGroupedHtmlTable(clientName, trips) {
     }
   }
 
-  const mapHtml = generateVesselMapHtml(uniqueVessels);
+  const mapHtml = generateVesselMapHtml(uniqueVessels.map(onWatchVesselKey));
 
   return `
     <!DOCTYPE html>
