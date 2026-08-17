@@ -474,6 +474,11 @@ function generateLiveScheduleScript(clientName) {
           scheduleContentEl.innerHTML = contentHtml;
           rebuildFilterDropdowns(trips);
 
+          // RACE CONDITION BRIDGE: Re-apply the live Map statuses to the brand new HTML elements
+          if (typeof window.reapplyStatuses === 'function') {
+            window.reapplyStatuses();
+          }
+
           var timestampEl = document.querySelector('.timestamp');
           if (timestampEl) {
             timestampEl.textContent = 'Updated: ' + new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }) + ' AEST (live)';
@@ -482,7 +487,7 @@ function generateLiveScheduleScript(clientName) {
 
         function loadLiveSchedule() {
           if (!HELM_SCHEDULE_PROXY_URL) {
-            console.warn('HELM_SCHEDULE_PROXY_URL is not set yet - ?live=true has nothing to fetch, static schedule stays as-is.');
+            console.warn('HELM_SCHEDULE_PROXY_URL is not set yet - ?live=true has nothing to fetch.');
             return;
           }
 
@@ -570,6 +575,12 @@ function generateVesselMapHtml(relevantVesselNames) {
         var powerAutomateUrl = ${JSON.stringify(POWER_AUTOMATE_REFRESH_URL)};
         var liveProxyUrl = ${JSON.stringify(LIVE_POSITION_PROXY_URL)};
         var REFRESH_COOLDOWN_MS = 90000;
+
+        // GLOBAL BRIDGE: Save vessel statuses so the Schedule logic can request them during redraws
+        window.lastKnownVessels = {};
+        window.reapplyStatuses = function() {
+          updateRowStatuses(window.lastKnownVessels);
+        };
 
         var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.793, 151.250], 12);
 
@@ -835,6 +846,7 @@ function generateVesselMapHtml(relevantVesselNames) {
               });
             });
 
+          window.lastKnownVessels = vesselByName;
           resolveLabelPlacements(visibleEntries);
           updateRowStatuses(vesselByName);
 
