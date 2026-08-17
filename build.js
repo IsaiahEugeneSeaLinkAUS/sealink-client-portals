@@ -53,10 +53,6 @@ const CLIENT_CONFIG = [
 // ---------------------------------------------------------------------------
 // 2b. STOP COORDINATES (for departed/delayed/arrived status + map labels)
 // ---------------------------------------------------------------------------
-// From OnWatch's Stops list. Maintenance Slipway, Maintenance Wharf, and
-// Service Wharf deliberately excluded - not operational client stops.
-// `aliases` should cover every way Helm's Location From/To Name text might
-// spell this stop - matched case/whitespace-insensitively.
 const STOPS = [
   { name: 'CP1', aliases: ['cp1'], lat: -23.78493, lon: 151.16916 },
   { name: 'CP3', aliases: ['cp3'], lat: -23.75329, lon: 151.17814 },
@@ -67,10 +63,6 @@ const STOPS = [
   { name: 'Marina', aliases: ['marina', 'sealink marina', 'gladstone marina'], lat: -23.82783, lon: 151.24350 }
 ];
 
-// Helm and OnWatch don't always spell a vessel's name identically (e.g.
-// Helm's "R.B Trojan" vs OnWatch's "Trojan") - live position/status
-// matching is a straight name comparison, so a mismatch here silently
-// drops that vessel from both the map and its schedule status badges.
 // Keyed on Helm's spelling (lowercase), value is OnWatch's spelling.
 const VESSEL_NAME_ALIASES = {
   'r.b. trojan': 'trojan'
@@ -89,10 +81,9 @@ function parseHelmDate(dateStr) {
 
   const clean = String(dateStr).trim().replace('T', ' ');
   const parts = clean.split(' ');
-  const isoDate = parts[0]; // YYYY-MM-DD
-  const rawTime = parts[1] ? parts[1].substring(0, 5) : '00:00'; // HH:MM
+  const isoDate = parts[0]; 
+  const rawTime = parts[1] ? parts[1].substring(0, 5) : '00:00'; 
 
-  // Explicitly append +10:00 offset so JS interprets as Australia/Brisbane local time
   const isoWithOffset = `${isoDate}T${rawTime}:00+10:00`;
   const dateObj = new Date(isoWithOffset);
 
@@ -134,7 +125,7 @@ async function fetchOnWatchPositions() {
     try {
       const errBody = await response.json();
       detail = errBody?.error?.code ? ` (${errBody.error.code}: ${errBody.error.param || ''})` : '';
-    } catch (_) { /* body wasn't JSON, or was empty - ignore */ }
+    } catch (_) { }
     throw new Error(`OnWatch VMS returned HTTP ${response.status}${detail}`);
   }
 
@@ -662,7 +653,6 @@ function generateVesselMapHtml(relevantVesselNames) {
         var AT_STOP_SLOW_RADIUS_M = 150;
         var AT_STOP_SPEED_KN = 1.0;
         var DELAY_GRACE_MIN = 2;
-        var ARRIVED_WINDOW_MIN = 10;
         var ARRIVED_LOOSE_RADIUS_M = 500;
         var DELAY_STALE_HOURS = 3;
 
@@ -719,18 +709,38 @@ function generateVesselMapHtml(relevantVesselNames) {
 
           var atDest = dest && isNearStop(vessel, dest);
           var roughlyNearDest = dest && distanceMeters(vessel.lat, vessel.lon, dest.lat, dest.lon) <= ARRIVED_LOOSE_RADIUS_M;
-          var arrivedWindowOpen = arrTs && now <= arrTs + ARRIVED_WINDOW_MIN * 60000;
 
-          if (arrivedWindowOpen && (atDest || (now >= arrTs && roughlyNearDest))) {
+          if (atDest || (now >= arrTs && roughlyNearDest)) {
             return { text: 'Arrived', className: 'badge-arrived' };
           }
 
-          if (!arrivedWindowOpen) return null;
-
-          if ((now - depTs) <= DELAY_STALE_HOURS * 3600000) {
-            return { text: 'Departed', className: 'badge-departed' };
+          if ((now - depTs) > DELAY_STALE_HOURS * 3600000) {
+            return null; 
           }
-          return null;
+
+          var statusText = 'Departed';
+          
+          if (dest && typeof vessel.speedKn === 'number' && vessel.speedKn > 1.5) {
+            var distMeters = distanceMeters(vessel.lat, vessel.lon, dest.lat, dest.lon);
+            var distNm = distMeters / 1852;
+            var hoursRemaining = distNm / vessel.speedKn;
+            var minsRemaining = Math.round(hoursRemaining * 60);
+
+            if (minsRemaining > 0 && minsRemaining < 240) {
+              var etaTs = now + (minsRemaining * 60000);
+              var etaDate = new Date(etaTs);
+              
+              var etaStr = etaDate.toLocaleTimeString('en-AU', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                hour12: false, 
+                timeZone: 'Australia/Brisbane' 
+              });
+              statusText = 'ETA ' + etaStr;
+            }
+          }
+
+          return { text: statusText, className: 'badge-departed' };
         }
 
         function updateRowStatuses(vesselByName) {
