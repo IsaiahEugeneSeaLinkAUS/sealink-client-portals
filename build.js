@@ -56,8 +56,7 @@ const CLIENT_CONFIG = [
 // From OnWatch's Stops list. Maintenance Slipway, Maintenance Wharf, and
 // Service Wharf deliberately excluded - not operational client stops.
 // `aliases` should cover every way Helm's Location From/To Name text might
-// spell this stop - matched case/whitespace-insensitively. Add more here
-// if a stop ever fails to match in practice.
+// spell this stop - matched case/whitespace-insensitively.
 const STOPS = [
   { name: 'CP1', aliases: ['cp1'], lat: -23.78493, lon: 151.16916 },
   { name: 'CP3', aliases: ['cp3'], lat: -23.75329, lon: 151.17814 },
@@ -73,8 +72,6 @@ const STOPS = [
 // matching is a straight name comparison, so a mismatch here silently
 // drops that vessel from both the map and its schedule status badges.
 // Keyed on Helm's spelling (lowercase), value is OnWatch's spelling.
-// Display text (schedule headers, filter dropdown) always uses Helm's
-// original spelling regardless - this only affects the matching key.
 const VESSEL_NAME_ALIASES = {
   'r.b. trojan': 'trojan'
 };
@@ -121,17 +118,6 @@ function parseHelmDate(dateStr) {
 // ---------------------------------------------------------------------------
 // ONWATCH VMS - VESSEL POSITIONS
 // ---------------------------------------------------------------------------
-// GET https://api.onwatchvms.com/v1/fleets/{fleet_id}/position
-// Confirmed against a real sample response:
-//   { "object": "list", "data": [
-//       { "vessel_id", "vessel_name", "latitude", "longitude",
-//         "heading": { "value", "unit" },
-//         "speed_over_ground": { "value", "unit" },
-//         "last_updated" }
-//   ] }
-// heading and speed_over_ground are nested {value, unit} objects, not bare
-// numbers - everything (including those nested values) comes back null for
-// a vessel with no GPS reading yet.
 async function fetchOnWatchPositions() {
   if (!ONWATCH_API_KEY || !ONWATCH_FLEET_ID) {
     console.warn('ONWATCH_API_KEY or ONWATCH_FLEET_ID not set - skipping position pull.');
@@ -166,8 +152,6 @@ function normalizeOnWatchPositions(rawVessels) {
       speedKn: v.speed_over_ground?.value,
       lastUpdated: v.last_updated
     }))
-    // Vessels with no GPS reading yet report every one of these fields as
-    // null - skip them rather than plotting a marker at (null, null).
     .filter(v => typeof v.lat === 'number' && typeof v.lon === 'number');
 }
 
@@ -179,9 +163,6 @@ async function generateSites() {
     headers['Api-Key'] = API_KEY;
   }
 
-  // Kick this off now and only await it once we actually need it below -
-  // it's completely independent of the Helm CSV work, so there's no reason
-  // to make it wait in line behind the CSV fetch/parse/processing.
   const onWatchPromise = fetchOnWatchPositions().catch(err => {
     console.error('Could not fetch OnWatch positions:', err.message);
     return [];
@@ -205,8 +186,7 @@ async function generateSites() {
   console.log(`Parsed ${records.length} total rows from Helm.`);
 
   // ---------------------------------------------------------------------------
-  // 3. FILTER OUT CANCELLED, COMPLETED, DRAFT & PENDING TRIPS, AND ANY
-  // TRIP WITH NO VESSEL ASSIGNED (stale/orphaned entries)
+  // 3. FILTER OUT CANCELLED, COMPLETED, DRAFT & PENDING TRIPS
   // ---------------------------------------------------------------------------
   const filteredTrips = records.filter(row => {
     const status = String(
@@ -219,7 +199,6 @@ async function generateSites() {
     const isCancelled = status.includes('CANCEL');
     const isComplete = status.includes('COMPLETE');
     const isDraft = status.includes('DRAFT') || status.includes('PENDING') || status.includes('UNCONFIRM');
-
     const hasVessel = (row['Resource'] || row['Vessel'] || row['Resource Name'] || row['Asset'] || '').trim() !== '';
 
     return !isCancelled && !isComplete && !isDraft && hasVessel;
@@ -248,7 +227,6 @@ async function generateSites() {
     }
   }
 
-  // Sort chronologically ascending
   validTrips.sort((a, b) => {
     const startA = parseHelmDate(a['Start'] || a['Requested Date']).timestamp;
     const startB = parseHelmDate(b['Start'] || b['Requested Date']).timestamp;
@@ -265,9 +243,7 @@ async function generateSites() {
   console.log('Trips by vessel:', JSON.stringify(tripCountByVessel));
 
   // ---------------------------------------------------------------------------
-  // 4b. LIVE VESSEL POSITIONS (OnWatch VMS) - fetch was already kicked off
-  // above, in parallel with the Helm CSV work, so this is usually an
-  // instant await rather than another round trip.
+  // 4b. LIVE VESSEL POSITIONS (OnWatch VMS)
   // ---------------------------------------------------------------------------
   const rawPositions = await onWatchPromise;
   const positions = normalizeOnWatchPositions(rawPositions);
@@ -276,7 +252,6 @@ async function generateSites() {
   const publicDir = path.join(__dirname, 'public');
   if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
 
-  // Copy the committed favicon into the build output, if it's there.
   const faviconSrc = path.join(__dirname, 'favicon.png');
   if (fs.existsSync(faviconSrc)) {
     fs.copyFileSync(faviconSrc, path.join(publicDir, 'favicon.png'));
@@ -284,9 +259,6 @@ async function generateSites() {
     console.warn('favicon.png not found at repo root - tab icon will be broken until it is added.');
   }
 
-  // Static positions file, served alongside the client pages on GitHub
-  // Pages. No credentials in here - just the position snapshot from this
-  // build run. Client pages fetch this via a relative path.
   fs.writeFileSync(
     path.join(publicDir, 'positions.json'),
     JSON.stringify({ fetchedAt: new Date().toISOString(), vessels: positions })
@@ -348,48 +320,15 @@ function formatRunTypeHtml(runTypeStr) {
 }
 
 // ---------------------------------------------------------------------------
-// LIVE VESSEL POSITION MAP
+// POWER AUTOMATE WEBHOOK ENDPOINTS
 // ---------------------------------------------------------------------------
-// Renders a Leaflet map (free tiles, no API key) that reads a static
-// positions.json - generated once per build, alongside this page, by
-// fetchOnWatchPositions() above. On GitHub Pages there's no server to poll
-// live, so "live" here really means "as fresh as the last GitHub Actions
-// run" (plus a little GitHub CDN caching) - see the workflow schedule for
-// ---------------------------------------------------------------------------
-// how often that is.
-//
-// The "Refresh" button fires the Power Automate HTTP-triggered flow that
-// kicks off the same GitHub Actions rebuild - see the note in chat about
-// setting POWER_AUTOMATE_REFRESH_URL below. It's a fire-and-forget POST:
-// mode: 'no-cors' is used deliberately, since Power Automate's HTTP trigger
-// doesn't reliably send CORS headers a browser can read, and we don't need
-// to read the response anyway - we just need the request to go out.
 const POWER_AUTOMATE_REFRESH_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/15/workflows/acd148e9258345fe9d06ea0c27ccbe18/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=EeYMoctJ_NBYz8naEbTZ4ocKDiJGUV-wvedCFaWkMFA';
-
-// Optional: a second HTTP-triggered Power Automate flow that calls OnWatch
-// directly and returns its raw response (see chat for the setup steps).
-// When this is set, position polling bypasses the rebuild cycle entirely -
-// genuinely live, bounded only by OnWatch's own ~2 min GPS reporting lag.
-// Left blank, the map just falls back to whatever positions.json says.
 const LIVE_POSITION_PROXY_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/23/workflows/5dcebc97cfd740069d8cf07fc5320a90/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=2vF8GXOU11kmSuoCa6bIDrNeRMw94X8A-GW0cXaPdJk';
-
-// Live schedule mode (opt-in via ?live=true) - a Power Automate flow that
-// passes Helm's CSV straight through, parsed client-side with PapaParse.
-// Blank until the flow's built; the ?live=true path just no-ops until then,
-// leaving the normal build-time-rendered schedule untouched either way.
 const HELM_SCHEDULE_PROXY_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/2c832f74e76849ee9c72d01b0a6888b0/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=DdkliVqORCRq8lL8d4fG5mmSZEn17PjoG2OJfR5oNZQ';
 
 // ---------------------------------------------------------------------------
 // LIVE SCHEDULE MODE (opt-in via ?live=true)
 // ---------------------------------------------------------------------------
-// Mirrors this file's own filtering/dedup/grouping logic in client-side JS,
-// fetching Helm's CSV live via HELM_SCHEDULE_PROXY_URL and re-rendering
-// #scheduleContent - same markup, same classes, same data-* attributes as
-// the build-time version, so the existing filter dropdown and status-badge
-// logic (computeRunStatus/updateRowStatuses, already in the map's script)
-// keep working completely unchanged. Additive only - without ?live=true in
-// the URL, or with HELM_SCHEDULE_PROXY_URL still blank, this never runs and
-// the normal build-time-rendered schedule is exactly what shows.
 function generateLiveScheduleScript(clientName) {
   return `
     <script>
@@ -400,7 +339,7 @@ function generateLiveScheduleScript(clientName) {
         var HELM_SCHEDULE_PROXY_URL = ${JSON.stringify(HELM_SCHEDULE_PROXY_URL)};
         var CLIENT_NAME = ${JSON.stringify(clientName)};
         var VESSEL_NAME_ALIASES_LIVE = ${JSON.stringify(VESSEL_NAME_ALIASES)};
-        var LIVE_SCHEDULE_POLL_MS = 10 * 60 * 1000; // 10 min, matching the existing rebuild cadence
+        var LIVE_SCHEDULE_POLL_MS = 10 * 60 * 1000; // 10 min
 
         function onWatchVesselKeyLive(helmName) {
           var key = (helmName || '').trim().toLowerCase();
@@ -492,12 +431,12 @@ function generateLiveScheduleScript(clientName) {
           dayLabels.forEach(function (dateLabel) {
             var dayData = dayGroups[dateLabel];
             contentHtml += '<div class="day-block" data-date="' + dayData.isoDate + '">' +
-              '<div class="day-header-banner">\\uD83D\\uDCC5 ' + dateLabel + '</div>';
+              '<div class="day-header-banner">📅 ' + dateLabel + '</div>';
 
             Object.keys(dayData.vessels).forEach(function (vesselName) {
               var dayVesselTrips = dayData.vessels[vesselName];
               contentHtml += '<div class="vessel-block" data-vessel-name="' + vesselName.toLowerCase() + '">' +
-                '<div class="vessel-sub-header">\\uD83D\\uDEA2 Vessel: <strong>' + vesselName + '</strong></div>' +
+                '<div class="vessel-sub-header">🚢 Vessel: <strong>' + vesselName + '</strong></div>' +
                 '<div class="table-scroll"><table class="schedule-table"><thead><tr>' +
                 '<th>Run Type</th><th>Route</th><th>Dep Time</th><th>Arr Time</th><th>Status</th>' +
                 '</tr></thead><tbody>';
@@ -555,11 +494,22 @@ function generateLiveScheduleScript(clientName) {
             console.warn('HELM_SCHEDULE_PROXY_URL is not set yet - ?live=true has nothing to fetch, static schedule stays as-is.');
             return;
           }
-          fetch(HELM_SCHEDULE_PROXY_URL)
-            .then(function (res) { return res.text(); })
+
+          fetch(HELM_SCHEDULE_PROXY_URL, { method: 'POST' })
+            .then(function (res) {
+              if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + res.statusText);
+              return res.text();
+            })
             .then(function (csvText) {
+              if (!csvText || !csvText.trim()) throw new Error('Empty CSV received from proxy');
+
               var parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
-              var records = parsed.data;
+              var records = parsed.data || [];
+
+              if (records.length === 0) {
+                console.warn('Live schedule parsed 0 rows - retaining static build view');
+                return;
+              }
 
               var filtered = records.filter(function (row) {
                 var status = String(row['Status'] || row['Job Status'] || row['Trip Status'] || '').toUpperCase().trim();
@@ -602,10 +552,13 @@ function generateLiveScheduleScript(clientName) {
         loadLiveSchedule();
         setInterval(loadLiveSchedule, LIVE_SCHEDULE_POLL_MS);
       })();
-    <\/script>
+    </script>
   `;
 }
 
+// ---------------------------------------------------------------------------
+// LIVE VESSEL POSITION MAP
+// ---------------------------------------------------------------------------
 function generateVesselMapHtml(relevantVesselNames) {
   if (relevantVesselNames.length === 0) return '';
 
@@ -625,7 +578,7 @@ function generateVesselMapHtml(relevantVesselNames) {
         var relevantVessels = ${JSON.stringify(relevantVesselNames)}.map(function (n) { return n.trim().toLowerCase(); });
         var powerAutomateUrl = ${JSON.stringify(POWER_AUTOMATE_REFRESH_URL)};
         var liveProxyUrl = ${JSON.stringify(LIVE_POSITION_PROXY_URL)};
-        var REFRESH_COOLDOWN_MS = 90000; // matches a realistic build+deploy time - also caps how often this can fire
+        var REFRESH_COOLDOWN_MS = 90000;
 
         var map = L.map('vessel-map', { scrollWheelZoom: false }).setView([-23.793, 151.250], 12);
 
@@ -634,9 +587,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           maxZoom: 17
         }).addTo(map);
 
-        // Underway threshold for the heading arrow - below this, no arrow
-        // shows at all (reads as stopped/arrived); above it, a single
-        // small arrow rotates to match the vessel's current heading.
         var UNDERWAY_SPEED_KN = 5;
         var HULL_R = 7;
         var HULL_CY = 16;
@@ -664,10 +614,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           });
         }
 
-        // Vessels within this radius of the Maintenance Slipway are hidden
-        // from the map entirely - not client-relevant, and this location
-        // deliberately isn't in STOPS so it never shows as a labelled stop
-        // or feeds into the departed/delayed/arrived logic.
         var MAINTENANCE_SLIPWAY = { lat: -23.83619, lon: 151.24365 };
         var HIDE_RADIUS_M = 200;
 
@@ -675,11 +621,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           return distanceMeters(vessel.lat, vessel.lon, MAINTENANCE_SLIPWAY.lat, MAINTENANCE_SLIPWAY.lon) <= HIDE_RADIUS_M;
         }
 
-        // A vessel offline for a while (e.g. not operating over a weekend)
-        // still has a last-known position sitting in OnWatch, which would
-        // otherwise show as a marker frozen wherever it was last seen,
-        // looking exactly like a live position. Hide it once that
-        // position is old enough to no longer be meaningfully "current".
         var STALE_POSITION_HOURS = 12;
 
         function isStalePosition(vessel) {
@@ -688,12 +629,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           return ageMs > STALE_POSITION_HOURS * 3600000;
         }
 
-        // Vessels sitting at the Marina are shown greyed-out (inactive),
-        // except Trojan, which actually operates trips out of the Marina.
-        // Greys out whenever the vessel is sitting at any known stop -
-        // the same condition that puts a stop name next to its label on
-        // the map. Trojan is the one exception, since it actually
-        // operates trips out of the Marina rather than sitting idle there.
         function isInactiveAtStop(vessel) {
           var key = (vessel.name || '').trim().toLowerCase();
           var stopName = nearestStopName(vessel);
@@ -702,9 +637,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           return true;
         }
 
-        // Short codes for the map label - falls back to the full name (as
-        // given) for any vessel not in this list, so a new or unmapped
-        // vessel still shows something rather than nothing.
         var VESSEL_SHORT_NAMES = {
           'goodna': 'GOOD',
           'brahminy kite': 'BRKI',
@@ -720,11 +652,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           return VESSEL_SHORT_NAMES[key] || vesselName;
         }
 
-        // Stop coordinates, aliases, and the thresholds used to decide
-        // whether a vessel counts as "at" a given stop right now. Same
-        // list as build.js's STOPS - kept here since this all runs
-        // client-side, computed against whatever time it is when the
-        // browser checks, not build time.
         var STOPS = ${JSON.stringify(STOPS)};
         var STOP_BY_ALIAS = {};
         STOPS.forEach(function (stop) {
@@ -732,14 +659,13 @@ function generateVesselMapHtml(relevantVesselNames) {
         });
 
         var AT_STOP_RADIUS_M = 100;
-        var AT_STOP_SLOW_RADIUS_M = 150; // wider allowance when clearly stationary, to absorb GPS jitter
+        var AT_STOP_SLOW_RADIUS_M = 150;
         var AT_STOP_SPEED_KN = 1.0;
         var DELAY_GRACE_MIN = 2;
         var ARRIVED_WINDOW_MIN = 10;
-        var ARRIVED_LOOSE_RADIUS_M = 500; // generous tolerance for docking GPS imprecision, without accepting "still transiting nearby" as arrived
-        var DELAY_STALE_HOURS = 3; // ignore a row's departure time if it's this far in the past - avoids flagging long-finished runs
+        var ARRIVED_LOOSE_RADIUS_M = 500;
+        var DELAY_STALE_HOURS = 3;
 
-        // Haversine distance in meters between two lat/lon points.
         function distanceMeters(lat1, lon1, lat2, lon2) {
           var R = 6371000;
           var toRad = function (d) { return d * Math.PI / 180; };
@@ -759,9 +685,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           return false;
         }
 
-        // Which known stop (if any) is this vessel currently sitting at -
-        // used for the "GOOD CP1" style map label, independent of any
-        // particular scheduled run.
         function nearestStopName(vessel) {
           for (var i = 0; i < STOPS.length; i++) {
             if (isNearStop(vessel, STOPS[i])) return STOPS[i].name;
@@ -772,28 +695,17 @@ function generateVesselMapHtml(relevantVesselNames) {
         var markers = {};
         var refreshBtn = document.getElementById('refresh-positions-btn');
 
-        // Departed / Delayed / Arrived, computed fresh every check from the
-        // schedule's own times vs right now - no history or persisted
-        // state needed. Returns null when the build-time "Confirmed" badge
-        // should just be left alone (not due yet, too long ago to still be
-        // live-tracked, or sitting at destination outside the arrived window).
         function computeRunStatus(row, vessel, now) {
           var depTs = parseInt(row.getAttribute('data-dep-ts'), 10);
           var arrTs = parseInt(row.getAttribute('data-arr-ts'), 10);
           if (!depTs || now < depTs) return null;
 
-          // Once the vessel's next scheduled run has begun, this row is
-          // done - stop evaluating it live. Without this cap, a vessel
-          // that returns to this row's origin stop later (as the
-          // destination of a subsequent leg) looks identical to "never
-          // left in the first place", which would wrongly revive a
-          // Delayed badge on a run that already completed on time.
           var nextDepTs = parseInt(row.getAttribute('data-next-dep-ts'), 10);
           if (nextDepTs && now >= nextDepTs) return null;
 
           var origin = STOP_BY_ALIAS[row.getAttribute('data-from')];
           var dest = STOP_BY_ALIAS[row.getAttribute('data-to')];
-          if (!origin) return null; // can't assess delay without knowing where it started from
+          if (!origin) return null;
 
           var atOrigin = isNearStop(vessel, origin);
 
@@ -805,17 +717,6 @@ function generateVesselMapHtml(relevantVesselNames) {
             return null;
           }
 
-          // Left the origin. "Arrived" combines two signals rather than
-          // relying on either alone:
-          //  - being detected right at the destination (handles early
-          //    arrivals, before the scheduled time)
-          //  - the scheduled time passing AND being at least roughly
-          //    close by (handles imprecise docking GPS - a vessel can sit
-          //    just outside the strict 100/150m "at stop" radius without
-          //    having actually failed to arrive)
-          // What this rules out: a vessel genuinely still transiting miles
-          // away when its scheduled time ticks over - that should read as
-          // still Departed (running late), not falsely Arrived.
           var atDest = dest && isNearStop(vessel, dest);
           var roughlyNearDest = dest && distanceMeters(vessel.lat, vessel.lon, dest.lat, dest.lon) <= ARRIVED_LOOSE_RADIUS_M;
           var arrivedWindowOpen = arrTs && now <= arrTs + ARRIVED_WINDOW_MIN * 60000;
@@ -824,7 +725,7 @@ function generateVesselMapHtml(relevantVesselNames) {
             return { text: 'Arrived', className: 'badge-arrived' };
           }
 
-          if (!arrivedWindowOpen) return null; // past the arrived window - drop back to Confirmed
+          if (!arrivedWindowOpen) return null;
 
           if ((now - depTs) <= DELAY_STALE_HOURS * 3600000) {
             return { text: 'Departed', className: 'badge-departed' };
@@ -846,15 +747,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           });
         }
 
-        // When two or more vessels are close enough on screen that their
-        // permanent labels would overlap, stagger them onto different
-        // sides instead of letting them stack illegibly. Distance is
-        // measured in screen pixels (not lat/lon), since that's what
-        // actually determines whether labels visually collide - the same
-        // lat/lon gap looks totally different at different zoom levels.
-        // Re-resolved from scratch every refresh rather than remembered,
-        // so a cluster that splits up on a later check goes straight back
-        // to normal placement.
         var LABEL_COLLISION_PX = 40;
         var LABEL_DIRECTIONS = ['top', 'bottom', 'right', 'left'];
         var LABEL_OFFSETS = { top: [0, -8], bottom: [0, 8], right: [14, 0], left: [-14, 0] };
@@ -894,20 +786,13 @@ function generateVesselMapHtml(relevantVesselNames) {
           });
         }
 
-        // Shared renderer - both the live proxy and the static snapshot
-        // feed into this once normalized to the same {name, lat, lon,
-        // speedKn, headingDeg} shape, so marker-drawing logic only lives
-        // in one place.
         function applyPositions(vessels, labelText) {
           var vesselByName = {};
-          var visibleEntries = []; // {name, marker, labelHtml, inactive, topClearance} - tooltip placement resolved after all markers are positioned
+          var visibleEntries = [];
 
           vessels
             .filter(function (v) { return relevantVessels.indexOf((v.name || '').trim().toLowerCase()) !== -1; })
             .forEach(function (v) {
-              // Populated regardless of map visibility - the schedule
-              // badges (Departed/Delayed/Arrived) should still reflect
-              // reality even for a vessel currently hidden from the map.
               vesselByName[(v.name || '').trim().toLowerCase()] = v;
 
               if (isInMaintenanceZone(v) || isStalePosition(v)) {
@@ -947,7 +832,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           if (updatedEl) updatedEl.textContent = labelText;
         }
 
-        // Fallback: whatever was baked in at the last GitHub Pages build.
         function fetchStaticSnapshot() {
           fetch('../positions.json?t=' + Date.now())
             .then(function (res) { return res.json(); })
@@ -962,9 +846,6 @@ function generateVesselMapHtml(relevantVesselNames) {
             });
         }
 
-        // Live: call OnWatch directly via the Power Automate proxy, bypassing
-        // the rebuild cycle. Parses OnWatch's raw response shape client-side
-        // since the proxy just passes it straight through.
         function fetchLivePositions() {
           fetch(liveProxyUrl, { method: 'POST' })
             .then(function (res) { return res.json(); })
@@ -990,9 +871,6 @@ function generateVesselMapHtml(relevantVesselNames) {
             });
         }
 
-        // Passive re-fetch, used on load, every 60s automatically, and once
-        // right after a rebuild request. Prefers the live proxy when it's
-        // configured; otherwise just re-checks the static snapshot.
         function refreshPositions() {
           if (liveProxyUrl) {
             fetchLivePositions();
@@ -1001,9 +879,6 @@ function generateVesselMapHtml(relevantVesselNames) {
           }
         }
 
-        // Active: ask Power Automate to kick off a brand-new OnWatch pull +
-        // rebuild, then show the freshest published data straight away and
-        // let the normal 60s poll pick up the new build once it lands.
         function requestFreshRebuild() {
           if (!refreshBtn) return;
 
@@ -1024,9 +899,6 @@ function generateVesselMapHtml(relevantVesselNames) {
               refreshPositions();
               refreshBtn.textContent = '↻ Refreshing data…';
 
-              // Cooldown - stops rapid re-clicks from spamming Power
-              // Automate / cancelling GitHub's in-flight build over and
-              // over. Countdown text just keeps the wait understandable.
               var secondsLeft = Math.round(REFRESH_COOLDOWN_MS / 1000);
               var countdown = setInterval(function () {
                 secondsLeft -= 1;
@@ -1034,7 +906,7 @@ function generateVesselMapHtml(relevantVesselNames) {
                   clearInterval(countdown);
                   refreshBtn.disabled = false;
                   refreshBtn.textContent = '↻ Refresh';
-                  refreshPositions(); // one more check - the rebuild should have landed by now
+                  refreshPositions();
                 } else {
                   refreshBtn.textContent = '↻ Wait ' + secondsLeft + 's';
                 }
@@ -1065,7 +937,6 @@ function generateGroupedHtmlTable(clientName, trips) {
   if (trips.length === 0) {
     contentHtml = `<div style="text-align:center; padding: 40px; color: #666;">No upcoming confirmed trips scheduled.</div>`;
   } else {
-    // Structure: Group by Day -> Group by Vessel
     const dayGroups = {};
 
     trips.forEach(t => {
@@ -1123,13 +994,6 @@ function generateGroupedHtmlTable(clientName, trips) {
           const arrTime = parsedEnd.timeStr;
           const status = formatStatus(row['Status']);
 
-          // The vessel's next scheduled departure after this run, if any -
-          // used client-side to stop treating this row as "live" once the
-          // vessel has clearly moved on. Without this, a vessel returning
-          // to this row's origin stop later (as the destination of a
-          // later leg) can look identical to "never left in the first
-          // place", wrongly reviving a Delayed badge on an already-
-          // completed run.
           const nextTrip = dayVesselTrips[tripIndex + 1];
           const nextDepTs = nextTrip ? nextTrip.parsedStart.timestamp : '';
 
@@ -1172,7 +1036,7 @@ function generateGroupedHtmlTable(clientName, trips) {
         `;
       }
 
-      contentHtml += `</div>`; // End day-block
+      contentHtml += `</div>`;
     }
   }
 
@@ -1243,11 +1107,9 @@ function generateGroupedHtmlTable(clientName, trips) {
         .run-type-italic { font-style: italic; color: #555; font-weight: normal; }
         .run-type-scheduled-text { font-weight: bold; color: #0a3663; }
 
-        /* SCHEDULED RUN ROW: Entire row fully bolded with pleasant blue background */
         .scheduled-run-row { background-color: #e8f4fd; font-weight: bold; color: #0a3663; border-left: 4px solid #00529b; }
         .scheduled-run-row td { color: #0a3663; font-weight: bold; }
 
-        /* EXTRA RUN ROW: Light orange background & orange badge */
         .extra-run-row { background-color: #fffaf0; }
         .run-type-extra-badge { background-color: #ffe8cc; color: #d97706; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; border: 1px solid #fbd38d; display: inline-block; }
 
@@ -1360,19 +1222,16 @@ function generateGroupedHtmlTable(clientName, trips) {
             if (show) visibleCount++;
           });
 
-          // Toggle Vessel Block Visibility inside Day Blocks
           document.querySelectorAll('.vessel-block').forEach(vesselBlock => {
             const visibleChildRows = vesselBlock.querySelectorAll('.data-row:not([style*="display: none"])');
             vesselBlock.style.display = visibleChildRows.length > 0 ? '' : 'none';
           });
 
-          // Toggle Day Block Visibility
           document.querySelectorAll('.day-block').forEach(dayBlock => {
             const visibleVesselBlocks = dayBlock.querySelectorAll('.vessel-block:not([style*="display: none"])');
             dayBlock.style.display = visibleVesselBlocks.length > 0 ? '' : 'none';
           });
 
-          // Toggle No Results Banner
           document.getElementById('noResults').style.display = (visibleCount === 0) ? 'block' : 'none';
         }
 
