@@ -373,6 +373,239 @@ const POWER_AUTOMATE_REFRESH_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed284
 // Left blank, the map just falls back to whatever positions.json says.
 const LIVE_POSITION_PROXY_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/23/workflows/5dcebc97cfd740069d8cf07fc5320a90/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=2vF8GXOU11kmSuoCa6bIDrNeRMw94X8A-GW0cXaPdJk';
 
+// Live schedule mode (opt-in via ?live=true) - a Power Automate flow that
+// passes Helm's CSV straight through, parsed client-side with PapaParse.
+// Blank until the flow's built; the ?live=true path just no-ops until then,
+// leaving the normal build-time-rendered schedule untouched either way.
+const HELM_SCHEDULE_PROXY_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/2c832f74e76849ee9c72d01b0a6888b0/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=DdkliVqORCRq8lL8d4fG5mmSZEn17PjoG2OJfR5oNZQ';
+
+// ---------------------------------------------------------------------------
+// LIVE SCHEDULE MODE (opt-in via ?live=true)
+// ---------------------------------------------------------------------------
+// Mirrors this file's own filtering/dedup/grouping logic in client-side JS,
+// fetching Helm's CSV live via HELM_SCHEDULE_PROXY_URL and re-rendering
+// #scheduleContent - same markup, same classes, same data-* attributes as
+// the build-time version, so the existing filter dropdown and status-badge
+// logic (computeRunStatus/updateRowStatuses, already in the map's script)
+// keep working completely unchanged. Additive only - without ?live=true in
+// the URL, or with HELM_SCHEDULE_PROXY_URL still blank, this never runs and
+// the normal build-time-rendered schedule is exactly what shows.
+function generateLiveScheduleScript(clientName) {
+  return `
+    <script>
+      (function () {
+        var params = new URLSearchParams(window.location.search);
+        if (params.get('live') !== 'true') return;
+
+        var HELM_SCHEDULE_PROXY_URL = ${JSON.stringify(HELM_SCHEDULE_PROXY_URL)};
+        var CLIENT_NAME = ${JSON.stringify(clientName)};
+        var VESSEL_NAME_ALIASES_LIVE = ${JSON.stringify(VESSEL_NAME_ALIASES)};
+        var LIVE_SCHEDULE_POLL_MS = 10 * 60 * 1000; // 10 min, matching the existing rebuild cadence
+
+        function onWatchVesselKeyLive(helmName) {
+          var key = (helmName || '').trim().toLowerCase();
+          return VESSEL_NAME_ALIASES_LIVE[key] || key;
+        }
+
+        function parseHelmDateLive(dateStr) {
+          if (!dateStr) return { isoDate: '', dateLabel: 'TBD', timeStr: 'TBD', timestamp: 0 };
+          var clean = String(dateStr).trim().replace('T', ' ');
+          var parts = clean.split(' ');
+          var isoDate = parts[0];
+          var rawTime = parts[1] ? parts[1].substring(0, 5) : '00:00';
+          var dateObj = new Date(isoDate + 'T' + rawTime + ':00+10:00');
+          var dateLabel = 'TBD';
+          if (!isNaN(dateObj.getTime())) {
+            dateLabel = dateObj.toLocaleDateString('en-AU', {
+              weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Australia/Brisbane'
+            });
+          }
+          return { isoDate: isoDate, dateLabel: dateLabel, timeStr: rawTime, timestamp: isNaN(dateObj.getTime()) ? 0 : dateObj.getTime() };
+        }
+
+        function formatStatusLive(statusStr) {
+          if (!statusStr) return 'Confirmed';
+          var clean = statusStr.replace(/^STATUS_/i, '');
+          return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
+        }
+
+        function formatRunTypeHtmlLive(runTypeStr) {
+          var clean = (runTypeStr || 'Scheduled Run').trim();
+          var lower = clean.toLowerCase();
+          if (lower.indexOf('internal') !== -1 || lower.indexOf('return') !== -1) return '<em class="run-type-italic">' + clean + '</em>';
+          if (lower.indexOf('scheduled') !== -1) return '<span class="run-type-scheduled-text">' + clean + '</span>';
+          if (lower.indexOf('extra') !== -1) return '<span class="run-type-extra-badge">' + clean + '</span>';
+          return '<span>' + clean + '</span>';
+        }
+
+        function rebuildFilterDropdowns(trips) {
+          var vessels = [], seenV = {}, runTypes = [], seenR = {};
+          trips.forEach(function (t) {
+            var v = (t['Resource'] || t['Vessel'] || 'Unassigned').trim();
+            if (!seenV[v]) { seenV[v] = true; vessels.push(v); }
+            var rt = (t['Trip Type Name'] || 'Scheduled Run').trim();
+            if (!seenR[rt]) { seenR[rt] = true; runTypes.push(rt); }
+          });
+          vessels.sort();
+          runTypes.sort();
+
+          var vesselSelect = document.getElementById('vesselFilter');
+          if (vesselSelect) {
+            var keepV = vesselSelect.value;
+            vesselSelect.innerHTML = '<option value="">All Vessels</option>' +
+              vessels.map(function (v) { return '<option value="' + v + '">' + v + '</option>'; }).join('');
+            vesselSelect.value = keepV;
+          }
+          var runTypeSelect = document.getElementById('runTypeFilter');
+          if (runTypeSelect) {
+            var keepR = runTypeSelect.value;
+            runTypeSelect.innerHTML = '<option value="">All Run Types</option>' +
+              runTypes.map(function (rt) { return '<option value="' + rt + '">' + rt + '</option>'; }).join('');
+            runTypeSelect.value = keepR;
+          }
+        }
+
+        function renderLiveSchedule(trips) {
+          var scheduleContentEl = document.getElementById('scheduleContent');
+          if (!scheduleContentEl) return;
+
+          if (trips.length === 0) {
+            scheduleContentEl.innerHTML = '<div style="text-align:center; padding: 40px; color: #666;">No upcoming confirmed trips scheduled.</div>';
+            rebuildFilterDropdowns(trips);
+            return;
+          }
+
+          var dayGroups = {};
+          trips.forEach(function (t) {
+            var vessel = (t['Resource'] || t['Vessel'] || 'Unassigned').trim();
+            var parsedStart = parseHelmDateLive(t['Start'] || t['Requested Date']);
+            var parsedEnd = parseHelmDateLive(t['End']);
+            var dateLabel = parsedStart.dateLabel;
+            if (!dayGroups[dateLabel]) dayGroups[dateLabel] = { isoDate: parsedStart.isoDate, order: parsedStart.timestamp, vessels: {} };
+            if (!dayGroups[dateLabel].vessels[vessel]) dayGroups[dateLabel].vessels[vessel] = [];
+            dayGroups[dateLabel].vessels[vessel].push({ row: t, parsedStart: parsedStart, parsedEnd: parsedEnd, isoDate: parsedStart.isoDate });
+          });
+
+          var dayLabels = Object.keys(dayGroups).sort(function (a, b) { return dayGroups[a].order - dayGroups[b].order; });
+          var contentHtml = '';
+
+          dayLabels.forEach(function (dateLabel) {
+            var dayData = dayGroups[dateLabel];
+            contentHtml += '<div class="day-block" data-date="' + dayData.isoDate + '">' +
+              '<div class="day-header-banner">\\uD83D\\uDCC5 ' + dateLabel + '</div>';
+
+            Object.keys(dayData.vessels).forEach(function (vesselName) {
+              var dayVesselTrips = dayData.vessels[vesselName];
+              contentHtml += '<div class="vessel-block" data-vessel-name="' + vesselName.toLowerCase() + '">' +
+                '<div class="vessel-sub-header">\\uD83D\\uDEA2 Vessel: <strong>' + vesselName + '</strong></div>' +
+                '<div class="table-scroll"><table class="schedule-table"><thead><tr>' +
+                '<th>Run Type</th><th>Route</th><th>Dep Time</th><th>Arr Time</th><th>Status</th>' +
+                '</tr></thead><tbody>';
+
+              dayVesselTrips.forEach(function (entry, tripIndex) {
+                var row = entry.row, parsedStart = entry.parsedStart, parsedEnd = entry.parsedEnd, isoDate = entry.isoDate;
+                var runTypeRaw = row['Trip Type Name'] || 'Scheduled Run';
+                var depLoc = row['Location From Name'] || row['Origin'] || '-';
+                var arrLoc = row['Location To Name'] || row['Destination'] || '-';
+                var status = formatStatusLive(row['Status']);
+                var routeText = (depLoc && arrLoc) ? (depLoc + ' &rarr; ' + arrLoc) : (depLoc || arrLoc || 'Local Waters');
+                var lowerType = runTypeRaw.toLowerCase();
+                var rowClass = 'data-row';
+                if (lowerType.indexOf('scheduled') !== -1) rowClass += ' scheduled-run-row';
+                if (lowerType.indexOf('extra') !== -1) rowClass += ' extra-run-row';
+
+                var nextTrip = dayVesselTrips[tripIndex + 1];
+                var nextDepTs = nextTrip ? nextTrip.parsedStart.timestamp : '';
+
+                contentHtml += '<tr class="' + rowClass + '"' +
+                  ' data-vessel="' + vesselName.toLowerCase() + '"' +
+                  ' data-onwatch-vessel="' + onWatchVesselKeyLive(vesselName) + '"' +
+                  ' data-runtype="' + lowerType + '"' +
+                  ' data-date="' + isoDate + '"' +
+                  ' data-dep-ts="' + parsedStart.timestamp + '"' +
+                  ' data-arr-ts="' + parsedEnd.timestamp + '"' +
+                  ' data-next-dep-ts="' + nextDepTs + '"' +
+                  ' data-from="' + depLoc.trim().toLowerCase() + '"' +
+                  ' data-to="' + arrLoc.trim().toLowerCase() + '">' +
+                  '<td>' + formatRunTypeHtmlLive(runTypeRaw) + '</td>' +
+                  '<td class="route-cell">' + routeText + '</td>' +
+                  '<td>' + parsedStart.timeStr + '</td>' +
+                  '<td>' + parsedEnd.timeStr + '</td>' +
+                  '<td><span class="badge status-badge" data-original-status="' + status + '">' + status + '</span></td>' +
+                  '</tr>';
+              });
+
+              contentHtml += '</tbody></table></div></div>';
+            });
+
+            contentHtml += '</div>';
+          });
+
+          scheduleContentEl.innerHTML = contentHtml;
+          rebuildFilterDropdowns(trips);
+
+          var timestampEl = document.querySelector('.timestamp');
+          if (timestampEl) {
+            timestampEl.textContent = 'Updated: ' + new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }) + ' AEST (live)';
+          }
+        }
+
+        function loadLiveSchedule() {
+          if (!HELM_SCHEDULE_PROXY_URL) {
+            console.warn('HELM_SCHEDULE_PROXY_URL is not set yet - ?live=true has nothing to fetch, static schedule stays as-is.');
+            return;
+          }
+          fetch(HELM_SCHEDULE_PROXY_URL)
+            .then(function (res) { return res.text(); })
+            .then(function (csvText) {
+              var parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+              var records = parsed.data;
+
+              var filtered = records.filter(function (row) {
+                var status = String(row['Status'] || row['Job Status'] || row['Trip Status'] || '').toUpperCase().trim();
+                var isCancelled = status.indexOf('CANCEL') !== -1;
+                var isComplete = status.indexOf('COMPLETE') !== -1;
+                var isDraft = status.indexOf('DRAFT') !== -1 || status.indexOf('PENDING') !== -1 || status.indexOf('UNCONFIRM') !== -1;
+                var hasVessel = (row['Resource'] || row['Vessel'] || row['Resource Name'] || row['Asset'] || '').trim() !== '';
+                return !isCancelled && !isComplete && !isDraft && hasVessel;
+              });
+
+              var seen = {}, deduped = [];
+              filtered.forEach(function (row) {
+                var cust = (row['Customer Account Name'] || row['Customer'] || row['Account'] || '').trim();
+                var vessel = (row['Resource'] || row['Vessel'] || row['Resource Name'] || row['Asset'] || '').trim();
+                var type = (row['Trip Type Name'] || row['Trip Type'] || '').trim();
+                var start = (row['Start'] || row['Requested Date'] || '').trim();
+                var end = (row['End'] || '').trim();
+                var from = (row['Location From Name'] || row['Origin'] || '').trim();
+                var to = (row['Location To Name'] || row['Destination'] || '').trim();
+                var key = cust + '|' + vessel + '|' + type + '|' + start + '|' + end + '|' + from + '|' + to;
+                if (!seen[key]) { seen[key] = true; deduped.push(row); }
+              });
+
+              deduped.sort(function (a, b) {
+                return parseHelmDateLive(a['Start'] || a['Requested Date']).timestamp - parseHelmDateLive(b['Start'] || b['Requested Date']).timestamp;
+              });
+
+              var clientTrips = deduped.filter(function (row) {
+                var customer = String(row['Customer Account Name'] || row['Customer'] || row['Account'] || '').toLowerCase();
+                return customer.indexOf(CLIENT_NAME.toLowerCase()) !== -1;
+              });
+
+              renderLiveSchedule(clientTrips);
+            })
+            .catch(function (err) {
+              console.error('Live schedule fetch failed - leaving current content in place', err);
+            });
+        }
+
+        loadLiveSchedule();
+        setInterval(loadLiveSchedule, LIVE_SCHEDULE_POLL_MS);
+      })();
+    <\/script>
+  `;
+}
+
 function generateVesselMapHtml(relevantVesselNames) {
   if (relevantVesselNames.length === 0) return '';
 
@@ -955,6 +1188,7 @@ function generateGroupedHtmlTable(clientName, trips) {
       <link rel="icon" type="image/png" href="../favicon.png">
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
       <style>
         * { box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
@@ -1097,6 +1331,8 @@ function generateGroupedHtmlTable(clientName, trips) {
           ${contentHtml}
         </div>
       </div>
+
+      ${generateLiveScheduleScript(clientName)}
 
       <script>
         function applyFilters() {
