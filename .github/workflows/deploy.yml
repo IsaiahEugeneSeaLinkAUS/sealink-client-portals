@@ -1,12 +1,17 @@
 name: Build and deploy client schedule sites
 on:
   repository_dispatch:
-    types: [rebuild-request] # matches the Event Name set in Power Automate's "Create a repository dispatch event" action
+    types: [rebuild-request] # dormant now that the Power Automate flows calling this have been retired; kept as a manual escape hatch (gh api / curl) if ever needed
   schedule:
-    # Safety-net only - Power Automate's GitHub connector now drives the
-    # real cadence via repository_dispatch above; this hourly run just
-    # guarantees a rebuild happens even if that call ever fails.
-    - cron: '0 * * * *'
+    # Now the primary driver of rebuilds, not just a safety net - the
+    # schedule table and vessel map both refresh themselves client-side
+    # (see build.js), so a full rebuild is only needed weekly to refresh
+    # the static fallback content and pick up any code/roster changes.
+    # NOTE: GitHub auto-disables scheduled workflows on public repos after
+    # 60 days with no commits (runs don't count, only pushes do) - if this
+    # repo goes quiet that long, you'll need to re-enable it from the
+    # Actions tab (Settings > Actions will also show a warning banner).
+    - cron: '0 20 * * 0' # Sunday 20:00 UTC = Monday ~6am AEST (Brisbane doesn't observe DST, so no seasonal drift)
   workflow_dispatch: {} # lets you trigger a rebuild manually from the Actions tab
   push:
     branches: [main]
@@ -44,7 +49,6 @@ jobs:
           HELM_API_KEY: ${{ secrets.HELM_API_KEY }}
           ONWATCH_API_KEY: ${{ secrets.ONWATCH_API_KEY }}
           ONWATCH_FLEET_ID: ${{ secrets.ONWATCH_FLEET_ID }}
-          POWER_AUTOMATE_REFRESH_URL: ${{ secrets.POWER_AUTOMATE_REFRESH_URL }}
           LIVE_POSITION_PROXY_URL: ${{ secrets.LIVE_POSITION_PROXY_URL }}
           HELM_SCHEDULE_PROXY_URL: ${{ secrets.HELM_SCHEDULE_PROXY_URL }}
         run: node build.js
