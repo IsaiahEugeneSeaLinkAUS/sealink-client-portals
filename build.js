@@ -312,10 +312,21 @@ function formatRunTypeHtml(runTypeStr) {
 
 // ---------------------------------------------------------------------------
 // POWER AUTOMATE WEBHOOK ENDPOINTS
+// Read from GitHub Actions secrets (same pattern as HELM_CSV_URL/HELM_API_KEY
+// above) instead of being hardcoded here. Note this only keeps the sig
+// tokens out of the repo/build.js itself - all three still get embedded
+// into the generated client-side <script> blocks below, since the browser
+// has to call them directly for the live refresh button, the live position
+// poll, and ?live=true schedule mode. That part of the exposure (visible
+// via "view source" on the deployed pages) isn't changed by this.
 // ---------------------------------------------------------------------------
-const POWER_AUTOMATE_REFRESH_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/15/workflows/acd148e9258345fe9d06ea0c27ccbe18/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=EeYMoctJ_NBYz8naEbTZ4ocKDiJGUV-wvedCFaWkMFA';
-const LIVE_POSITION_PROXY_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/23/workflows/5dcebc97cfd740069d8cf07fc5320a90/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=2vF8GXOU11kmSuoCa6bIDrNeRMw94X8A-GW0cXaPdJk';
-const HELM_SCHEDULE_PROXY_URL = 'https://defaulta34bc0aba98f4dfe94203ff8ed2844.a5.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/2c832f74e76849ee9c72d01b0a6888b0/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=DdkliVqORCRq8lL8d4fG5mmSZEn17PjoG2OJfR5oNZQ';
+const POWER_AUTOMATE_REFRESH_URL = (process.env.POWER_AUTOMATE_REFRESH_URL || '').trim().replace(/^["']|["']$/g, '');
+const LIVE_POSITION_PROXY_URL = (process.env.LIVE_POSITION_PROXY_URL || '').trim().replace(/^["']|["']$/g, '');
+const HELM_SCHEDULE_PROXY_URL = (process.env.HELM_SCHEDULE_PROXY_URL || '').trim().replace(/^["']|["']$/g, '');
+
+if (!POWER_AUTOMATE_REFRESH_URL) console.warn('POWER_AUTOMATE_REFRESH_URL not set - the map "Refresh" button will fall back to re-checking existing data instead of forcing a rebuild.');
+if (!LIVE_POSITION_PROXY_URL) console.warn('LIVE_POSITION_PROXY_URL not set - the map will fall back to the static positions.json snapshot instead of live polling.');
+if (!HELM_SCHEDULE_PROXY_URL) console.warn('HELM_SCHEDULE_PROXY_URL not set - ?live=true schedule mode will have nothing to fetch.');
 
 // ---------------------------------------------------------------------------
 // LIVE SCHEDULE MODE (opt-in via ?live=true)
