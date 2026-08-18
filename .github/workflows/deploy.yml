@@ -1,5 +1,4 @@
 name: Build and deploy client schedule sites
-
 on:
   repository_dispatch:
     types: [rebuild-request] # matches the Event Name set in Power Automate's "Create a repository dispatch event" action
@@ -11,16 +10,13 @@ on:
   workflow_dispatch: {} # lets you trigger a rebuild manually from the Actions tab
   push:
     branches: [main]
-
 permissions:
   contents: read
   pages: write
   id-token: write
-
 concurrency:
   group: pages
   cancel-in-progress: false
-
 jobs:
   # Merged into one job (was previously build + deploy as two separate
   # jobs). Two jobs meant two full runner spin-ups plus an upload/download
@@ -35,29 +31,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm # needs package-lock.json committed alongside this workflow
-
       - name: Install dependencies
         run: npm ci
-
       - name: Build client sites
         env:
           HELM_CSV_URL: ${{ secrets.HELM_CSV_URL }}
           HELM_API_KEY: ${{ secrets.HELM_API_KEY }}
           ONWATCH_API_KEY: ${{ secrets.ONWATCH_API_KEY }}
           ONWATCH_FLEET_ID: ${{ secrets.ONWATCH_FLEET_ID }}
+          POWER_AUTOMATE_REFRESH_URL: ${{ secrets.POWER_AUTOMATE_REFRESH_URL }}
+          LIVE_POSITION_PROXY_URL: ${{ secrets.LIVE_POSITION_PROXY_URL }}
+          HELM_SCHEDULE_PROXY_URL: ${{ secrets.HELM_SCHEDULE_PROXY_URL }}
         run: node build.js
-
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
-
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
