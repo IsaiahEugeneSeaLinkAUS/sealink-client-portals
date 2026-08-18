@@ -329,15 +329,13 @@ if (!LIVE_POSITION_PROXY_URL) console.warn('LIVE_POSITION_PROXY_URL not set - th
 if (!HELM_SCHEDULE_PROXY_URL) console.warn('HELM_SCHEDULE_PROXY_URL not set - ?live=true schedule mode will have nothing to fetch.');
 
 // ---------------------------------------------------------------------------
-// LIVE SCHEDULE MODE (opt-in via ?live=true)
+// LIVE SCHEDULE MODE (now the default for every visitor - previously
+// opt-in via ?live=true while this was being tested)
 // ---------------------------------------------------------------------------
 function generateLiveScheduleScript(clientName) {
   return `
     <script>
       (function () {
-        var params = new URLSearchParams(window.location.search);
-        if (params.get('live') !== 'true') return;
-
         var HELM_SCHEDULE_PROXY_URL = ${JSON.stringify(HELM_SCHEDULE_PROXY_URL)};
         var CLIENT_NAME = ${JSON.stringify(clientName)};
         var VESSEL_NAME_ALIASES_LIVE = ${JSON.stringify(VESSEL_NAME_ALIASES)};
