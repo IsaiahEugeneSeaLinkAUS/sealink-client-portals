@@ -311,22 +311,19 @@ function formatRunTypeHtml(runTypeStr) {
 }
 
 // ---------------------------------------------------------------------------
-// POWER AUTOMATE WEBHOOK ENDPOINTS
-// Read from GitHub Actions secrets (same pattern as HELM_CSV_URL/HELM_API_KEY
-// above) instead of being hardcoded here. Note this only keeps the sig
-// tokens out of the repo/build.js itself - all three still get embedded
-// into the generated client-side <script> blocks below, since the browser
-// has to call them directly for the live refresh button, the live position
-// poll, and ?live=true schedule mode. That part of the exposure (visible
-// via "view source" on the deployed pages) isn't changed by this.
+// LIVE DATA PROXY ENDPOINTS (Power Automate)
+// Neither of these triggers a site rebuild - both are plain HTTP-triggered
+// flows that relay a live fetch (OnWatch positions / Helm schedule CSV)
+// straight back to the browser. The flows that used to trigger full
+// rebuilds (the 10-min recurrence flow, and the old Refresh-button flow)
+// have been retired - see deploy.yml for the new weekly cron, and the
+// Refresh button below now just re-polls these two directly.
 // ---------------------------------------------------------------------------
-const POWER_AUTOMATE_REFRESH_URL = (process.env.POWER_AUTOMATE_REFRESH_URL || '').trim().replace(/^["']|["']$/g, '');
 const LIVE_POSITION_PROXY_URL = (process.env.LIVE_POSITION_PROXY_URL || '').trim().replace(/^["']|["']$/g, '');
 const HELM_SCHEDULE_PROXY_URL = (process.env.HELM_SCHEDULE_PROXY_URL || '').trim().replace(/^["']|["']$/g, '');
 
-if (!POWER_AUTOMATE_REFRESH_URL) console.warn('POWER_AUTOMATE_REFRESH_URL not set - the map "Refresh" button will fall back to re-checking existing data instead of forcing a rebuild.');
 if (!LIVE_POSITION_PROXY_URL) console.warn('LIVE_POSITION_PROXY_URL not set - the map will fall back to the static positions.json snapshot instead of live polling.');
-if (!HELM_SCHEDULE_PROXY_URL) console.warn('HELM_SCHEDULE_PROXY_URL not set - ?live=true schedule mode will have nothing to fetch.');
+if (!HELM_SCHEDULE_PROXY_URL) console.warn('HELM_SCHEDULE_PROXY_URL not set - the live schedule poll will have nothing to fetch.');
 
 // ---------------------------------------------------------------------------
 // LIVE SCHEDULE MODE (now the default for every visitor - previously
@@ -554,6 +551,10 @@ function generateLiveScheduleScript(clientName) {
             });
         }
 
+        // Bridges to the map's Refresh button (see generateVesselMapHtml),
+        // so one click re-polls both positions and the schedule table.
+        window.reloadLiveSchedule = loadLiveSchedule;
+
         loadLiveSchedule();
         setInterval(loadLiveSchedule, LIVE_SCHEDULE_POLL_MS);
       })();
@@ -581,7 +582,6 @@ function generateVesselMapHtml(relevantVesselNames) {
     <script>
       (function () {
         var relevantVessels = ${JSON.stringify(relevantVesselNames)}.map(function (n) { return n.trim().toLowerCase(); });
-        var powerAutomateUrl = ${JSON.stringify(POWER_AUTOMATE_REFRESH_URL)};
         var liveProxyUrl = ${JSON.stringify(LIVE_POSITION_PROXY_URL)};
         var REFRESH_COOLDOWN_MS = 90000;
 
@@ -910,43 +910,35 @@ function generateVesselMapHtml(relevantVesselNames) {
           }
         }
 
-        function requestFreshRebuild() {
+        // No longer triggers a full site rebuild via Power Automate - just
+        // forces an immediate re-poll of positions and the schedule table,
+        // the same data the page already refreshes on its own every 60s/10min.
+        function requestFreshData() {
           if (!refreshBtn) return;
 
-          if (!powerAutomateUrl) {
-            console.warn('POWER_AUTOMATE_REFRESH_URL is not set - button will only re-check existing data.');
-            refreshPositions();
-            return;
+          refreshBtn.disabled = true;
+          refreshBtn.textContent = '↻ Refreshing…';
+
+          refreshPositions();
+          if (typeof window.reloadLiveSchedule === 'function') {
+            window.reloadLiveSchedule();
           }
 
-          refreshBtn.disabled = true;
-          refreshBtn.textContent = '↻ Requesting…';
-
-          fetch(powerAutomateUrl, { method: 'POST', mode: 'no-cors' })
-            .catch(function (err) {
-              console.error('Could not reach Power Automate trigger', err);
-            })
-            .finally(function () {
-              refreshPositions();
-              refreshBtn.textContent = '↻ Refreshing data…';
-
-              var secondsLeft = Math.round(REFRESH_COOLDOWN_MS / 1000);
-              var countdown = setInterval(function () {
-                secondsLeft -= 1;
-                if (secondsLeft <= 0) {
-                  clearInterval(countdown);
-                  refreshBtn.disabled = false;
-                  refreshBtn.textContent = '↻ Refresh';
-                  refreshPositions();
-                } else {
-                  refreshBtn.textContent = '↻ Wait ' + secondsLeft + 's';
-                }
-              }, 1000);
-            });
+          var secondsLeft = Math.round(REFRESH_COOLDOWN_MS / 1000);
+          var countdown = setInterval(function () {
+            secondsLeft -= 1;
+            if (secondsLeft <= 0) {
+              clearInterval(countdown);
+              refreshBtn.disabled = false;
+              refreshBtn.textContent = '↻ Refresh';
+            } else {
+              refreshBtn.textContent = '↻ Wait ' + secondsLeft + 's';
+            }
+          }, 1000);
         }
 
         if (refreshBtn) {
-          refreshBtn.addEventListener('click', requestFreshRebuild);
+          refreshBtn.addEventListener('click', requestFreshData);
         }
 
         refreshPositions();
