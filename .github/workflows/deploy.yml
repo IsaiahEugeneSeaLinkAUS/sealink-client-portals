@@ -1,0 +1,61 @@
+name: Build and deploy client schedule sites
+on:
+  repository_dispatch:
+    types: [rebuild-request] # dormant now that the Power Automate flows calling this have been retired; kept as a manual escape hatch (gh api / curl) if ever needed
+  schedule:
+    # Now the primary driver of rebuilds, not just a safety net - the
+    # schedule table and vessel map both refresh themselves client-side
+    # (see build.js), so a full rebuild is only needed weekly to refresh
+    # the static fallback content and pick up any code/roster changes.
+    # NOTE: GitHub auto-disables scheduled workflows on public repos after
+    # 60 days with no commits (runs don't count, only pushes do) - if this
+    # repo goes quiet that long, you'll need to re-enable it from the
+    # Actions tab (Settings > Actions will also show a warning banner).
+    - cron: '0 20 * * 0' # Sunday 20:00 UTC = Monday ~6am AEST (Brisbane doesn't observe DST, so no seasonal drift)
+  workflow_dispatch: {} # lets you trigger a rebuild manually from the Actions tab
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  # Merged into one job (was previously build + deploy as two separate
+  # jobs). Two jobs meant two full runner spin-ups plus an upload/download
+  # hand-off of the artifact between them - none of which this small site
+  # needs. One job removes that whole layer of overhead.
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm # needs package-lock.json committed alongside this workflow
+      - name: Install dependencies
+        run: npm ci
+      - name: Build client sites
+        env:
+          HELM_CSV_URL: ${{ secrets.HELM_CSV_URL }}
+          HELM_API_KEY: ${{ secrets.HELM_API_KEY }}
+          ONWATCH_API_KEY: ${{ secrets.ONWATCH_API_KEY }}
+          ONWATCH_FLEET_ID: ${{ secrets.ONWATCH_FLEET_ID }}
+          LIVE_POSITION_PROXY_URL: ${{ secrets.LIVE_POSITION_PROXY_URL }}
+          HELM_SCHEDULE_PROXY_URL: ${{ secrets.HELM_SCHEDULE_PROXY_URL }}
+        run: node build.js
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
