@@ -1,12 +1,13 @@
 {
-  "name": "sealink-client-schedule-sites",
+  "name": "sealink-gladstone-client",
   "private": true,
-  "version": "1.0.0",
-  "description": "Builds per-client schedule + live vessel position pages for GitHub Pages.",
+  "type": "module",
   "scripts": {
-    "build": "node build.js"
+    "test": "node --test test/*.test.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
-  "dependencies": {
-    "csv-parse": "^5.6.0"
+  "devDependencies": {
+    "wrangler": "^3.90.0"
   }
 }
